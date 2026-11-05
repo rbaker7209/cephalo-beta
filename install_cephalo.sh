@@ -56,6 +56,10 @@ LOCALE="en_US.UTF-8"
 KEYBOARD_LAYOUT="us"
 TIMEZONE="${TIMEZONE:-UTC}"
 
+# --- Assorted OS naming tags ----------------------------------------------
+OS_VERSION="0.0.9.5"
+OS_CODENAME="Tannuella"
+
 # --- Hardware-compatibility toggles ---------------------------------------
 # The installer detects the hardware (CPU, GPU, Wi-Fi, drive) and installs only
 # what it needs. Each toggle below is  auto (detect)  |  1 (force on)  |  0 (never).
