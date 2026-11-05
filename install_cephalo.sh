@@ -866,10 +866,10 @@ VERSION_ID="${OS_VERSION}"
 VERSION="${OS_VERSION} (${OS_CODENAME})"
 VERSION_CODENAME="${OS_CODENAME}"
 DEBIAN_VERSION_FULL=13.7
-ID=debian
-HOME_URL="https://www.debian.org/"
-SUPPORT_URL="https://www.debian.org/support"
-BUG_REPORT_URL="https://bugs.debian.org/"
+ID=cephalo
+HOME_URL="https://github.com/rbaker7209/cephalo-beta"
+SUPPORT_URL="https://github.com/rbaker7209/cephalo-beta/issues/"
+BUG_REPORT_URL="https://github.com/rbaker7209/cephalo-beta/issues/"
 EOF
 
 # --- labwc desktop configuration ---
