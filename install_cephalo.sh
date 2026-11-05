@@ -59,6 +59,7 @@ TIMEZONE="${TIMEZONE:-UTC}"
 # --- Assorted OS naming tags ----------------------------------------------
 OS_VERSION="0.0.9.5"
 OS_CODENAME="Tannuella"
+OS_BRANCH="PRERELEASE"
 
 # --- Hardware-compatibility toggles ---------------------------------------
 # The installer detects the hardware (CPU, GPU, Wi-Fi, drive) and installs only
@@ -859,7 +860,7 @@ EOF
 fi
 
 cat > /etc/os-release <<'EOF'
-PRETTY_NAME="Cephalo OS prerelease ${OS_CODENAME}"
+PRETTY_NAME="Cephalo OS ${OS_BRANCH} ${OS_CODENAME}"
 NAME="cephalo ${OS_VERSION}"
 VERSION_ID="${OS_VERSION}"
 VERSION="${OS_VERSION} (${OS_CODENAME})"
