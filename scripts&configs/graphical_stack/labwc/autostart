@@ -1,12 +1,12 @@
 #!/bin/sh
-exec >>"\$HOME/.labwc-autostart.log" 2>&1
-echo "=== autostart run: \$(date) ==="
+exec >>"$HOME/.labwc-autostart.log" 2>&1
+echo "=== autostart run: $(date) ==="
 
 # Import the session environment into the systemd/dbus user managers, then make
 # sure the audio stack is up so Bluetooth audio devices are handled right away.
-command -v dbus-update-activation-environment >/dev/null 2>&1 && \\
+command -v dbus-update-activation-environment >/dev/null 2>&1 && \
     dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP DISPLAY
-command -v systemctl >/dev/null 2>&1 && \\
+command -v systemctl >/dev/null 2>&1 && \
     systemctl --user --no-block start pipewire.service wireplumber.service pipewire-pulse.service
 
 if command -v cephalo-wallpaper >/dev/null 2>&1; then
@@ -29,8 +29,8 @@ for agent in \
     /usr/lib/lxqt-policykit/lxqt-policykit-agent \
     /usr/bin/lxpolkit
 do
-    if [ -x "\$agent" ]; then
-        "\$agent" &
+    if [ -x "$agent" ]; then
+        "$agent" &
         break
     fi
 done
