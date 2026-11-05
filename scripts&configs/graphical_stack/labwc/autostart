@@ -1,0 +1,42 @@
+#!/bin/sh
+exec >>"\$HOME/.labwc-autostart.log" 2>&1
+echo "=== autostart run: \$(date) ==="
+
+# Import the session environment into the systemd/dbus user managers, then make
+# sure the audio stack is up so Bluetooth audio devices are handled right away.
+command -v dbus-update-activation-environment >/dev/null 2>&1 && \\
+    dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP DISPLAY
+command -v systemctl >/dev/null 2>&1 && \\
+    systemctl --user --no-block start pipewire.service wireplumber.service pipewire-pulse.service
+
+if command -v cephalo-wallpaper >/dev/null 2>&1; then
+    # per-monitor wallpaper sized to each screen; keeps running to follow hot-plug
+    cephalo-wallpaper &
+elif [ -f /usr/share/backgrounds/cephalo-gradient.png ] && command -v swaybg >/dev/null 2>&1; then
+    swaybg -i /usr/share/backgrounds/cephalo-gradient.png -m fill &
+elif command -v swaybg >/dev/null 2>&1; then
+    swaybg -c 1e1e2e &
+fi
+
+command -v yambar >/dev/null 2>&1 && yambar &
+command -v mako >/dev/null 2>&1 && mako &
+
+for agent in \
+    /usr/lib/mate-polkit/polkit-mate-authentication-agent-1 \
+    /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1 \
+    /usr/lib/x86_64-linux-gnu/libexec/polkit-kde-authentication-agent-1 \
+    /usr/lib/policykit-1-kde/polkit-kde-authentication-agent-1 \
+    /usr/lib/lxqt-policykit/lxqt-policykit-agent \
+    /usr/bin/lxpolkit
+do
+    if [ -x "\$agent" ]; then
+        "\$agent" &
+        break
+    fi
+done
+
+# (no nm-applet: yambar has no tray. Wi-Fi is handled by cephalo-wifi-menu instead.)
+# Blueman applet = Bluetooth pairing agent (PIN / passkey prompts) + notifications.
+# It is started for the agent only; there is no tray icon to show.
+command -v blueman-applet >/dev/null 2>&1 && blueman-applet &
+command -v xfce4-power-manager >/dev/null 2>&1 && xfce4-power-manager &
