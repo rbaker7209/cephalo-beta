@@ -1,0 +1,91 @@
+# Cephalo status bar (yambar): clock, Wi-Fi and Bluetooth. Colours are RRGGBBAA.
+#   Wi-Fi:      left-click = network menu (Super+W)   right-click = connection editor
+#   Bluetooth:  left-click = device menu  (Super+B)   right-click = Blueman
+# yambar does not run click handlers through a shell, so use absolute paths.
+
+wifi-click: &wifi-click
+  left: /usr/local/bin/cephalo-wifi-menu
+  right: /usr/bin/nm-connection-editor
+
+bt-click: &bt-click
+  left: /usr/local/bin/cephalo-bt-menu
+  right: /usr/bin/blueman-manager
+
+bar:
+  location: top
+  layer: top
+  height: 32
+  background: 1e1e2ee6
+  foreground: cdd6f4ff
+  font: "Noto Sans:pixelsize=13, FontAwesome:pixelsize=13"
+  left-margin: 10
+  right-margin: 10
+  spacing: 10
+
+  center:
+    - clock:
+        date-format: "%a %d %b"
+        time-format: "%H:%M"
+        content:
+          - string:
+              text: "{date}  {time}"
+
+  right:
+    # Wi-Fi: cephalo-wifi-status prints  state (wifi|ethernet|connecting|
+    # disconnected|off|missing)  and  label.
+    - script:
+        path: /usr/local/bin/cephalo-wifi-status
+        content:
+          map:
+            conditions:
+              state == wifi:
+                string:
+                  text: "\uf1eb  {label}"
+                  foreground: 89b4faff
+                  on-click: *wifi-click
+              state == ethernet:
+                string:
+                  text: "\uf1eb  {label}"
+                  on-click: *wifi-click
+              state == connecting:
+                string:
+                  text: "\uf1eb  {label}"
+                  foreground: f9e2afff
+                  on-click: *wifi-click
+            default:
+              string:
+                text: "\uf1eb  {label}"
+                foreground: 6c7086ff
+                on-click: *wifi-click
+
+    # Bluetooth: cephalo-bt-status prints  state (connected|on|off|missing),
+    # label (battery % of connected devices) and the bools  low  /  critical.
+    - script:
+        path: /usr/local/bin/cephalo-bt-status
+        content:
+          map:
+            conditions:
+              critical:
+                string:
+                  text: "\uf293  {label}"
+                  foreground: f38ba8ff
+                  on-click: *bt-click
+              low:
+                string:
+                  text: "\uf293  {label}"
+                  foreground: f9e2afff
+                  on-click: *bt-click
+              state == connected:
+                string:
+                  text: "\uf293  {label}"
+                  foreground: 89b4faff
+                  on-click: *bt-click
+              state == on:
+                string:
+                  text: "\uf293  {label}"
+                  on-click: *bt-click
+            default:
+              string:
+                text: "\uf293  {label}"
+                foreground: 6c7086ff
+                on-click: *bt-click
