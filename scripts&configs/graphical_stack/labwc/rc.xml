@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<labwc_config>
+  <theme>
+    <name>Arc-Dark</name>
+    <cornerRadius>8</cornerRadius>
+    <font place="ActiveWindow">
+      <name>Sans</name>
+      <size>10</size>
+    </font>
+  </theme>
+  <keyboard>
+    <keybind key="W-Return"><action name="Execute" command="foot"/></keybind>
+    <keybind key="W-d"><action name="Execute" command="wofi --show drun"/></keybind>
+    <keybind key="W-e"><action name="Execute" command="thunar"/></keybind>
+    <keybind key="W-q"><action name="Close"/></keybind>
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <keybind key="W-b"><action name="Execute" command="cephalo-bt-menu"/></keybind>
+    <keybind key="W-w"><action name="Execute" command="cephalo-wifi-menu"/></keybind>
+    <keybind key="XF86AudioRaiseVolume"><action name="Execute" command="wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"/></keybind>
+    <keybind key="XF86AudioLowerVolume"><action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"/></keybind>
+    <keybind key="XF86AudioMute"><action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"/></keybind>
+    <keybind key="XF86AudioMicMute"><action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"/></keybind>
+    <keybind key="XF86AudioPlay"><action name="Execute" command="playerctl play-pause"/></keybind>
+    <keybind key="XF86AudioPause"><action name="Execute" command="playerctl pause"/></keybind>
+    <keybind key="XF86AudioNext"><action name="Execute" command="playerctl next"/></keybind>
+    <keybind key="XF86AudioPrev"><action name="Execute" command="playerctl previous"/></keybind>
+  </keyboard>
+</labwc_config>
