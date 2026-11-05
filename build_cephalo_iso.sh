@@ -48,7 +48,7 @@ KERNEL_TARGET="${KERNEL_TARGET:-v1}"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
 SUITE="trixie"
 
-HOSTNAME="cephalo-live"
+HOSTNAME="cephalo-INSTdisk"
 LOCALE="en_US.UTF-8"
 KEYBOARD_LAYOUT="us"
 
