@@ -854,6 +854,19 @@ PRIORITY=100
 EOF
 fi
 
+cat > /etc/os-release <<'EOF'
+PRETTY_NAME="Cephalo OS prerelease (Tannuella)"
+NAME="cephalo 0.0.9.5"
+VERSION_ID="0.0.9.5"
+VERSION="0.0.9.5 (Tannuella)"
+VERSION_CODENAME=Tannuella
+DEBIAN_VERSION_FULL=13.7
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+EOF
+
 # --- labwc desktop configuration ---
 mkdir -p /usr/share/backgrounds
 if command -v convert >/dev/null 2>&1; then
