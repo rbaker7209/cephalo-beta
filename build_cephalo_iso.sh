@@ -75,7 +75,7 @@ TOOL_PKGS="iw rfkill kbd pciutils usbutils"
 MICROCODE_PKGS="intel-microcode amd64-microcode"
 # Network firmware only: Wi-Fi first, plus the Ethernet NICs that refuse to
 # work without blobs. No GPU, sound or other firmware (the console runs on
-# the firmware framebuffer via nomodeset).
+# the firmware framebuffer via nomodeset, thank god theres no nvidia drivers).
 FIRMWARE_PKGS="firmware-iwlwifi firmware-atheros firmware-realtek firmware-brcm80211 firmware-ath9k-htc firmware-libertas firmware-ralink firmware-mediatek firmware-misc-nonfree firmware-bnx2 firmware-bnx2x"
 
 # Build tools needed only to compile the Broadcom module; removed afterwards
@@ -188,7 +188,7 @@ set -euo pipefail
 
 echo 'APT::Install-Recommends "0";' > /etc/apt/apt.conf.d/99no-recommends
 
-# Don't install docs, man/info pages or translations (copyright files stay)
+# Don't install docs, man/info pages or translations (copyright files stay, I dont really want to get sued)
 cat > /etc/dpkg/dpkg.cfg.d/99-cephalo-slim <<EOF
 path-exclude=/usr/share/doc/*
 path-include=/usr/share/doc/*/copyright
