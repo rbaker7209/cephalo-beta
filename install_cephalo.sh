@@ -114,6 +114,30 @@ MESA_PKGS="libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-vulkan-drivers mesa-va
 BCM_STA_IDS="4311 4312 4315 4328 4329 432b 432c 4331 43a0 43a1 43a2 43b1 4365"
 BCM_SMAC_IDS="4353 4357 4358 4359 4727"
 
+# --- cephalo packages --------------------------------------------------------
+
+LABWC_AUTOSTART_URL="${LABWC_AUTOSTART_URL:-https://raw.githubusercontent.com/rbaker7209/cephalo-beta/refs/heads/prerelease/scripts%26configs/graphical_stack/labwc/autostart}"
+LABWC_AUTOSTART_SHA="5997d5f8cae62c49a0663fd0154ebbd0a57995b2e346878119e648114317ed64"
+
+LABWC_ENVIROMENT_URL="${LABWC_ENVIROMENT_URL:-https://raw.githubusercontent.com/rbaker7209/cephalo-beta/refs/heads/prerelease/scripts%26configs/graphical_stack/labwc/enviroment}"
+LABWC_ENVIROMENT_SHA="bb8d3b65d2f093cb5ed90d91495c3d166887050692777a4f1f4d4a01a775a9fe"
+
+LABWC_RC_URL="${LABWC_RC_URL:-https://raw.githubusercontent.com/rbaker7209/cephalo-beta/refs/heads/prerelease/scripts%26configs/graphical_stack/labwc/rc.xml}"
+LABWC_RC_SHA="a555ce76f3f55002cb6074abee71f5f9efbba510c1fe1d3b266a0c2ca5ebaca9"
+
+LABWC_MENU_URL="${LABWC_MENU_URL:-https://raw.githubusercontent.com/rbaker7209/cephalo-beta/refs/heads/prerelease/scripts%26configs/graphical_stack/labwc/menu.xml}"
+LABWC_MENU_SHA="9f4697d9c926b551d4b99a459cda27f739b3239e72fb60a0bd6e080f34e27ec3"
+
+YAMBAR_CONFIG_URL="${YAMBAR_CONFIG_URL:-https://raw.githubusercontent.com/rbaker7209/cephalo-beta/refs/heads/prerelease/scripts%26configs/graphical_stack/yambar/config.yml}"
+YAMBAR_CONFIG_SHA="1f7f2c5be70add67cc2dec630201b15cae23d0e927337f1bf563a3e6df58e649"
+
+MAKO_CONFIG_URL="${MAKO_CONFIG_URL:-https://raw.githubusercontent.com/rbaker7209/cephalo-beta/refs/heads/prerelease/scripts%26configs/graphical_stack/mako/config}"
+MAKO_CONFIG_SHA="8bc16ed1cb3eb4c556cbe4f0a44c27f8d607b92c6dde43f1514f2fab27598bff"
+
+GTK_SETTINGS_URL="${GTK_SETTINGS_URL:-https://raw.githubusercontent.com/rbaker7209/cephalo-beta/refs/heads/prerelease/scripts%26configs/graphical_stack/GTK/settings.ini}"
+GTK_SETTINGS_SHA="1387109fb93526525ad6fb74314d685f6bd13f993176db39ee7d13b6b4ea7a56"
+
+
 # --- Wallpaper ---------------------------------------------------------------
 WALLPAPER_NAME="${WALLPAPER_NAME:-humble_lightripple}"
 WALLPAPER_BASE_URL="${WALLPAPER_BASE_URL:-https://github.com/rbaker7209/cephalo-wallpapers/releases/download/humble_lightripple.v0.0.1}"
@@ -859,6 +883,100 @@ PRIORITY=100
 EOF
 fi
 
+# --- make download and check function ------------------------
+wget_and_check() {
+    local output=""
+    local url=""
+    local expected_hash=""
+
+    # Parse arguments
+    while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+            -O)
+                if [[ -z "\$2" ]]; then
+                    echo "ERROR: -O requires a file path."
+                    return 1
+                fi
+                output="\$2"
+                shift 2
+                ;;
+            *)
+                if [[ -z "\$url" ]]; then
+                    url="\$1"
+                elif [[ -z "\$expected_hash" ]]; then
+                    expected_hash="\$1"
+                else
+                    echo "ERROR: Unexpected argument: \$1"
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Validate arguments
+    if [[ -z "\$output" || -z "\$url" || -z "\$expected_hash" ]]; then
+        echo "Usage: wget_and_check -O <file_path> <URL> <SHA256_HASH>"
+        return 1
+    fi
+
+    # Create destination directory if necessary
+    local directory
+    directory=\$(dirname "\$output")
+
+    if ! mkdir -p "\$directory"; then
+        echo "ERROR: Could not create directory: \$directory"
+        return 1
+    fi
+
+    # Download file
+    echo "Downloading: \$url"
+
+    if ! wget -O "\$output" "\$url"; then
+        echo "ERROR: Download failed."
+        rm -f "\$output"
+        return 1
+    fi
+
+    # Check that the file exists
+    if [[ ! -f "\$output" ]]; then
+        echo "ERROR: Downloaded file not found at: \$output"
+        return 1
+    fi
+
+    # Check that the file is not empty
+    if [[ ! -s "\$output" ]]; then
+        echo "ERROR: Downloaded file is empty."
+        rm -f "\$output"
+        return 1
+    fi
+
+    # Calculate SHA256 hash
+    local actual_hash
+    actual_hash=\$(sha256sum "\$output" | awk '{print \$1}')
+
+    if [[ \$? -ne 0 ]]; then
+        echo "ERROR: Could not calculate file hash."
+        return 1
+    fi
+
+    # Compare hashes (case-insensitive)
+    if [[ "\${actual_hash,,}" != "\${expected_hash,,}" ]]; then
+        echo "ERROR: SHA256 hash mismatch!"
+        echo "Expected: \$expected_hash"
+        echo "Actual:   \$actual_hash"
+        rm -f "\$output"
+        return 1
+    fi
+
+    # Success
+    echo "SUCCESS: File downloaded and verified!"
+    echo "Location: \$output"
+    echo "SHA256:   \$actual_hash"
+
+    return 0
+}
+
 cat > /etc/os-release <<'EOF'
 PRETTY_NAME="Cephalo OS ${OS_BRANCH} ${OS_CODENAME}"
 NAME="cephalo ${OS_VERSION}"
@@ -881,218 +999,20 @@ fi
 mkdir -p /etc/skel/.config/labwc /etc/skel/.config/yambar /etc/skel/.config/mako \
          /etc/skel/.config/gtk-3.0
 
-cat > /etc/skel/.config/labwc/autostart <<'EOF'
-#!/bin/sh
-exec >>"\$HOME/.labwc-autostart.log" 2>&1
-echo "=== autostart run: \$(date) ==="
-
-# Import the session environment into the systemd/dbus user managers, then make
-# sure the audio stack is up so Bluetooth audio devices are handled right away.
-command -v dbus-update-activation-environment >/dev/null 2>&1 && \\
-    dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP DISPLAY
-command -v systemctl >/dev/null 2>&1 && \\
-    systemctl --user --no-block start pipewire.service wireplumber.service pipewire-pulse.service
-
-if command -v cephalo-wallpaper >/dev/null 2>&1; then
-    # per-monitor wallpaper sized to each screen; keeps running to follow hot-plug
-    cephalo-wallpaper &
-elif [ -f /usr/share/backgrounds/cephalo-gradient.png ] && command -v swaybg >/dev/null 2>&1; then
-    swaybg -i /usr/share/backgrounds/cephalo-gradient.png -m fill &
-elif command -v swaybg >/dev/null 2>&1; then
-    swaybg -c 1e1e2e &
-fi
-
-command -v yambar >/dev/null 2>&1 && yambar &
-command -v mako >/dev/null 2>&1 && mako &
-
-for agent in \
-    /usr/lib/mate-polkit/polkit-mate-authentication-agent-1 \
-    /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1 \
-    /usr/lib/x86_64-linux-gnu/libexec/polkit-kde-authentication-agent-1 \
-    /usr/lib/policykit-1-kde/polkit-kde-authentication-agent-1 \
-    /usr/lib/lxqt-policykit/lxqt-policykit-agent \
-    /usr/bin/lxpolkit
-do
-    if [ -x "\$agent" ]; then
-        "\$agent" &
-        break
-    fi
-done
-
-# (no nm-applet: yambar has no tray. Wi-Fi is handled by cephalo-wifi-menu instead.)
-# Blueman applet = Bluetooth pairing agent (PIN / passkey prompts) + notifications.
-# It is started for the agent only; there is no tray icon to show.
-command -v blueman-applet >/dev/null 2>&1 && blueman-applet &
-command -v xfce4-power-manager >/dev/null 2>&1 && xfce4-power-manager &
-EOF
+wget_and_check -O "/etc/skel/.config/labwc/autostart" "${LABWC_AUTOSTART_URL}" "${LABWC_AUTOSTART_SHA}"
 chmod +x /etc/skel/.config/labwc/autostart
 
-cat > /etc/skel/.config/labwc/environment <<'EOF'
-XCURSOR_THEME=Adwaita
-XCURSOR_SIZE=24
-GTK_THEME=Arc-Dark
-QT_QPA_PLATFORMTHEME=gtk3
-EOF
+wget_and_check -O "/etc/skel/.config/labwc/enviroment" "${LABWC_ENVIROMENT_URL}" "${LABWC_ENVIROMENT_SHA}"
 
-cat > /etc/skel/.config/labwc/rc.xml <<'EOF'
-<?xml version="1.0"?>
-<labwc_config>
-  <theme>
-    <name>Arc-Dark</name>
-    <cornerRadius>8</cornerRadius>
-    <font place="ActiveWindow">
-      <name>Sans</name>
-      <size>10</size>
-    </font>
-  </theme>
-  <keyboard>
-    <keybind key="W-Return"><action name="Execute" command="foot"/></keybind>
-    <keybind key="W-d"><action name="Execute" command="wofi --show drun"/></keybind>
-    <keybind key="W-e"><action name="Execute" command="thunar"/></keybind>
-    <keybind key="W-q"><action name="Close"/></keybind>
-    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
-    <keybind key="W-b"><action name="Execute" command="cephalo-bt-menu"/></keybind>
-    <keybind key="W-w"><action name="Execute" command="cephalo-wifi-menu"/></keybind>
-    <keybind key="XF86AudioRaiseVolume"><action name="Execute" command="wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"/></keybind>
-    <keybind key="XF86AudioLowerVolume"><action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"/></keybind>
-    <keybind key="XF86AudioMute"><action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"/></keybind>
-    <keybind key="XF86AudioMicMute"><action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"/></keybind>
-    <keybind key="XF86AudioPlay"><action name="Execute" command="playerctl play-pause"/></keybind>
-    <keybind key="XF86AudioPause"><action name="Execute" command="playerctl pause"/></keybind>
-    <keybind key="XF86AudioNext"><action name="Execute" command="playerctl next"/></keybind>
-    <keybind key="XF86AudioPrev"><action name="Execute" command="playerctl previous"/></keybind>
-  </keyboard>
-</labwc_config>
-EOF
+wget_and_check -O "/etc/skel/.config/labwc/rc.xml" "${LABWC_RC_URL}" "${LABWC_RC_SHA}"
 
-cat > /etc/skel/.config/labwc/menu.xml <<'EOF'
-<?xml version="1.0"?>
-<openbox_menu>
-  <menu id="root-menu" label="Cephalo">
-    <item label="Terminal"><action name="Execute"><command>foot</command></action></item>
-    <item label="Files"><action name="Execute"><command>thunar</command></action></item>
-    <item label="Web Browser"><action name="Execute"><command>firefox-esr</command></action></item>
-    <item label="App Launcher"><action name="Execute"><command>wofi --show drun</command></action></item>
-    <separator/>
-    <item label="Lock Screen"><action name="Execute"><command>swaylock -f -c 1e1e2e</command></action></item>
-    <item label="Power Off"><action name="Execute"><command>systemctl poweroff</command></action></item>
-  </menu>
-</openbox_menu>
-EOF
+wget_and_check -O "/etc/skel/.config/labwc/menu.xml" "${LABWC_MENU_URL}" "${LABWC_MENU_SHA}"
 
-cat > /etc/skel/.config/yambar/config.yml <<'EOF'
-# Cephalo status bar (yambar): clock, Wi-Fi and Bluetooth. Colours are RRGGBBAA.
-#   Wi-Fi:      left-click = network menu (Super+W)   right-click = connection editor
-#   Bluetooth:  left-click = device menu  (Super+B)   right-click = Blueman
-# yambar does not run click handlers through a shell, so use absolute paths.
+wget_and_check -O "/etc/skel/.config/yambar/config.yml" "${YAMBAR_CONFIG_URL}" "${YAMBAR_CONFIG_SHA}"
 
-wifi-click: &wifi-click
-  left: /usr/local/bin/cephalo-wifi-menu
-  right: /usr/bin/nm-connection-editor
+wget_and_check -O "/etc/skel/.config/mako/config" "${MAKO_CONFIG_URL}" "${MAKO_CONFIG_SHA}"
 
-bt-click: &bt-click
-  left: /usr/local/bin/cephalo-bt-menu
-  right: /usr/bin/blueman-manager
-
-bar:
-  location: top
-  layer: top
-  height: 32
-  background: 1e1e2ee6
-  foreground: cdd6f4ff
-  font: "Noto Sans:pixelsize=13, FontAwesome:pixelsize=13"
-  left-margin: 10
-  right-margin: 10
-  spacing: 10
-
-  center:
-    - clock:
-        date-format: "%a %d %b"
-        time-format: "%H:%M"
-        content:
-          - string:
-              text: "{date}  {time}"
-
-  right:
-    # Wi-Fi: cephalo-wifi-status prints  state (wifi|ethernet|connecting|
-    # disconnected|off|missing)  and  label.
-    - script:
-        path: /usr/local/bin/cephalo-wifi-status
-        content:
-          map:
-            conditions:
-              state == wifi:
-                string:
-                  text: "\uf1eb  {label}"
-                  foreground: 89b4faff
-                  on-click: *wifi-click
-              state == ethernet:
-                string:
-                  text: "\uf1eb  {label}"
-                  on-click: *wifi-click
-              state == connecting:
-                string:
-                  text: "\uf1eb  {label}"
-                  foreground: f9e2afff
-                  on-click: *wifi-click
-            default:
-              string:
-                text: "\uf1eb  {label}"
-                foreground: 6c7086ff
-                on-click: *wifi-click
-
-    # Bluetooth: cephalo-bt-status prints  state (connected|on|off|missing),
-    # label (battery % of connected devices) and the bools  low  /  critical.
-    - script:
-        path: /usr/local/bin/cephalo-bt-status
-        content:
-          map:
-            conditions:
-              critical:
-                string:
-                  text: "\uf293  {label}"
-                  foreground: f38ba8ff
-                  on-click: *bt-click
-              low:
-                string:
-                  text: "\uf293  {label}"
-                  foreground: f9e2afff
-                  on-click: *bt-click
-              state == connected:
-                string:
-                  text: "\uf293  {label}"
-                  foreground: 89b4faff
-                  on-click: *bt-click
-              state == on:
-                string:
-                  text: "\uf293  {label}"
-                  on-click: *bt-click
-            default:
-              string:
-                text: "\uf293  {label}"
-                foreground: 6c7086ff
-                on-click: *bt-click
-EOF
-
-cat > /etc/skel/.config/mako/config <<'EOF'
-background-color=#1e1e2eee
-text-color=#cdd6f4
-border-color=#89b4fa
-border-radius=8
-border-size=2
-default-timeout=5000
-font=Noto Sans 10
-EOF
-
-cat > /etc/skel/.config/gtk-3.0/settings.ini <<'EOF'
-[Settings]
-gtk-theme-name=Arc-Dark
-gtk-icon-theme-name=Papirus-Dark
-gtk-font-name=Noto Sans 10
-gtk-cursor-theme-name=Adwaita
-gtk-cursor-theme-size=24
-gtk-application-prefer-dark-theme=1
-EOF
+wget_and_check -O "/etc/skel/.config/gtk-3.0/settings.ini" "${GTK_SETTINGS_URL}" "${GTK_SETTINGS_SHA}"
 
 mkdir -p /etc/lightdm/lightdm.conf.d
 # installed system: normal greeter login, labwc session
@@ -1101,6 +1021,7 @@ cat > /etc/lightdm/lightdm.conf.d/50-session.conf <<EOF
 [Seat:*]
 user-session=labwc
 EOF
+
 # --- Plymouth boot splash ----------------------------------------------------
 # Installed after the kernel and every other package so the single initramfs
 # rebuild just below picks up the theme for every installed kernel.
