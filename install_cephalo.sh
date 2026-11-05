@@ -3,21 +3,45 @@
 # install-cephalo.sh — the Cephalo installer.
 #
 # Installs Cephalo (Debian Trixie + labwc, custom kernel, Firefox ESR, zRAM,
-# full Bluetooth + PipeWire audio stack with a Waybar Bluetooth manager)
+# full Bluetooth + PipeWire audio stack, and a minimal yambar status bar with a clock
+# plus clickable Wi-Fi and Bluetooth managers)
 # onto a disk. It is rolled into the minimal live ISO by build-cephalo-iso.sh under
 # /opt/cephalo and launched with the `cephalo-install` command.
 #
 # It shows a disk selection menu, partitions the chosen disk (GPT, bootable
 # on both BIOS and UEFI), debootstraps the system onto it, and installs GRUB.
-# The custom kernel is taken from the copy bundled in the ISO.
+# The kernel is downloaded from the Cephalo kernel repo on GitHub: a tuned
+# microarchitecture build (e.g. amd-excavator) when one exists for the detected
+# CPU, otherwise the generic x86-64-v1..v4 build matching the CPU's feature level.
+# The copy bundled in the ISO is only the offline/failure fallback.
+#
+# Hardware is detected automatically (CPU, GPU, Wi-Fi, drive) and only the matching
+# microcode, firmware and drivers are installed (NVIDIA driver picked with
+# nvidia-detect, Broadcom wl for the cards that need it, SSD/NVMe/HDD tuning).
 #
 # Run as root inside the live session; a network connection is required.
 #
 # Usage:
-#   cephalo-install
+#   cephalo-install           run the installer
+#   cephalo-install detect    only show detected hardware + the kernel it would use
 #
 # Optional presets (skip the matching prompt): INSTALL_DISK, INSTALL_HOSTNAME,
 # INSTALL_USER, INSTALL_PASS, INSTALL_YES=1 (skip the final erase confirmation).
+# Overrides: KERNEL_MODE=auto|generic|bundled, KERNEL_VARIANT=v3|amd-excavator|...,
+# INCLUDE_NVIDIA_DRIVER=auto|1|0, NVIDIA_DRIVER_PKG=<pkg>, INCLUDE_BROADCOM_STA=auto|1|0,
+# INSTALL_ALL_FIRMWARE=1 (install every firmware package regardless of hardware).
+#
+# Boot splash: Plymouth is installed and configured (quiet splash on the kernel
+# command line, early-KMS framebuffer in the initramfs) and the animated theme from
+# SPLASH_URL is installed and set as the default. INSTALL_SPLASH=0 skips all of it;
+# SPLASH_URL=<url> uses a different .tar.zst theme; SPLASH_THEME=<name> picks a
+# specific theme if the archive holds more than one.
+#
+# Wallpaper: cephalo-wallpaper reads each monitor's resolution (wlr-randr) and shows the
+# closest of the published sizes (<WALLPAPER_NAME>_<W>x<H>.png under WALLPAPER_BASE_URL),
+# downloading only the sizes the attached monitors need once the machine is online, and
+# follows monitor hot-plug. Nothing is downloaded at install time; until the first
+# download finishes (e.g. no network on first boot) the plain gradient is shown.
 
 set -euo pipefail
 
@@ -33,8 +57,21 @@ KEYBOARD_LAYOUT="us"
 TIMEZONE="${TIMEZONE:-UTC}"
 
 # --- Hardware-compatibility toggles ---------------------------------------
-INCLUDE_BROADCOM_STA="${INCLUDE_BROADCOM_STA:-1}"
-INCLUDE_NVIDIA_DRIVER="${INCLUDE_NVIDIA_DRIVER:-0}"
+# The installer detects the hardware (CPU, GPU, Wi-Fi, drive) and installs only
+# what it needs. Each toggle below is  auto (detect)  |  1 (force on)  |  0 (never).
+INCLUDE_BROADCOM_STA="${INCLUDE_BROADCOM_STA:-auto}"
+INCLUDE_NVIDIA_DRIVER="${INCLUDE_NVIDIA_DRIVER:-auto}"
+NVIDIA_DRIVER_PKG="${NVIDIA_DRIVER_PKG:-}"        # override nvidia-detect's choice
+INSTALL_ALL_FIRMWARE="${INSTALL_ALL_FIRMWARE:-0}" # 1 = old behaviour, every firmware pkg
+
+# --- Kernel: downloaded from the Cephalo kernel repo ----------------------
+# Assets are named  <ver>-ceph-<rel>-x86-64-<variant>.tar.zst  where <variant> is
+# either a generic level (v1..v4) or a microarchitecture (amd-excavator, ...).
+KERNEL_REPO="${KERNEL_REPO:-rbaker7209/cephalo-kernel-beta}"
+KERNEL_TAG="${KERNEL_TAG:-kernel_compile_full_0.0.8}"
+KERNEL_PIN="${KERNEL_PIN:-6.8.1-ceph-0.0.8.6}"    # used only if the release's asset list can't be read
+KERNEL_MODE="${KERNEL_MODE:-auto}"                # auto (microarch, then generic) | generic | bundled
+KERNEL_VARIANT="${KERNEL_VARIANT:-}"              # force one variant, e.g. v3 or amd-excavator
 
 # NOTE: these package sets describe the INSTALLED system (full labwc desktop).
 # The live installer ISO is a separate, minimal command-line image defined in
@@ -44,9 +81,9 @@ BASE_PKGS="locales console-setup keyboard-configuration sudo systemd-sysv networ
 
 DISPLAY_PKGS="xserver-xorg xserver-xorg-legacy xserver-xorg-video-all xserver-xorg-input-all lightdm lightdm-gtk-greeter"
 LABWC_PKGS="labwc xwayland thunar xfce4-power-manager"
-LABWC_EXTRA_PKGS="waybar wofi foot mako-notifier swaybg swaylock mate-polkit papirus-icon-theme arc-theme fonts-noto fonts-noto-color-emoji fonts-font-awesome network-manager-gnome imagemagick"
+LABWC_EXTRA_PKGS="yambar wofi foot mako-notifier swaybg swaylock mate-polkit papirus-icon-theme arc-theme fonts-noto fonts-noto-color-emoji fonts-font-awesome network-manager-gnome imagemagick wlr-randr wget ca-certificates"
 
-EXTRA_PKGS="firefox-esr file-roller zram-tools"
+EXTRA_PKGS="firefox-esr file-roller zram-tools micro"
 
 # --- Bluetooth + audio stack ----------------------------------------------
 # CORE packages must install (the build aborts otherwise) so we never ship a
@@ -58,12 +95,30 @@ BT_EXTRA_PKGS="bluez-obexd rtkit alsa-utils pulseaudio-utils pavucontrol libnoti
 BT_KERNEL_REQUIRED="BT BT_BREDR BT_LE BT_RFCOMM BT_BNEP BT_HIDP BT_HCIBTUSB UHID INPUT_UINPUT RFKILL CRYPTO_USER_API_HASH CRYPTO_USER_API_SKCIPHER CRYPTO_CMAC CRYPTO_ECB CRYPTO_ECDH"
 BT_KERNEL_RECOMMENDED="BT_INTEL BT_BCM BT_RTL BT_MTK BT_QCA BT_HCIBTUSB_BCM BT_HCIBTUSB_RTL BT_HCIBTUSB_MTK BT_HCIUART BT_HCIBTSDIO HIDRAW HID_GENERIC HID_BATTERY_STRENGTH"
 
-MICROCODE_PKGS="intel-microcode amd64-microcode"
-FIRMWARE_CORE_PKGS="firmware-misc-nonfree firmware-realtek firmware-atheros firmware-iwlwifi firmware-brcm80211 firmware-amd-graphics firmware-nvidia-graphics pciutils usbutils fwupd"
+# Firmware / driver packages are now chosen by detect_hardware(). These are the
+# always-installed basics plus the "install everything" lists (INSTALL_ALL_FIRMWARE=1).
+FIRMWARE_BASE_PKGS="firmware-misc-nonfree pciutils usbutils fwupd"
+FIRMWARE_CORE_PKGS="firmware-misc-nonfree firmware-realtek firmware-atheros firmware-iwlwifi firmware-brcm80211 firmware-amd-graphics firmware-nvidia-graphics pciutils usbutils fwupd intel-microcode amd64-microcode"
 FIRMWARE_EXTRA_PKGS="firmware-ath9k-htc firmware-libertas firmware-ralink firmware-mediatek firmware-sof-signed firmware-intel-sound firmware-intel-misc"
 DKMS_PKGS="build-essential dkms"
 BROADCOM_STA_PKGS="broadcom-sta-dkms"
-NVIDIA_PKGS="nvidia-driver nvidia-detect"
+MESA_PKGS="libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-vulkan-drivers mesa-va-drivers mesa-vdpau-drivers"
+
+# Broadcom PCI device IDs (vendor 14e4) that need the proprietary "wl" driver, and
+# those that have a mainline driver (brcmsmac) but fall back to wl if the kernel lacks it.
+BCM_STA_IDS="4311 4312 4315 4328 4329 432b 432c 4331 43a0 43a1 43a2 43b1 4365"
+BCM_SMAC_IDS="4353 4357 4358 4359 4727"
+
+# --- Wallpaper ---------------------------------------------------------------
+WALLPAPER_NAME="${WALLPAPER_NAME:-humble_lightripple}"
+WALLPAPER_BASE_URL="${WALLPAPER_BASE_URL:-https://github.com/rbaker7209/cephalo-wallpapers/releases/download/humble_lightripple.v0.0.1}"
+
+# --- Plymouth boot splash ---------------------------------------------------
+INSTALL_SPLASH="${INSTALL_SPLASH:-1}"             # 1 = install Plymouth + the splash theme, 0 = skip
+SPLASH_URL="${SPLASH_URL:-https://github.com/rbaker7209/cephalo-beta/releases/download/boot_splash.v0.0.2/spinning_cube.tar.zst}"
+SPLASH_THEME="${SPLASH_THEME:-}"                  # optional: theme name inside the archive (auto-detected)
+PLYMOUTH_PKGS="plymouth"                          # must install, otherwise the splash is skipped
+PLYMOUTH_EXTRA_PKGS="plymouth-label plymouth-themes"              # nice-to-have (text label plugin)
 
 # Bootloader packages installed into the *target* system:
 BOOT_PKGS="grub2-common grub-pc-bin grub-efi-amd64-bin efibootmgr"
@@ -103,15 +158,435 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-prepare_custom_kernel() {
-    # Use the kernel that was rolled into the live ISO.
-    KERNEL_SRC="$PAYLOAD_DIR/kernel"
-    [ -d "$KERNEL_SRC" ] || die "Bundled kernel not found at $KERNEL_SRC (is this the Cephalo live ISO?)"
-    log "Selected custom kernel directory: $KERNEL_SRC"
+# ============================ HARDWARE DETECTION ============================
+# All of this runs on the live system *before* anything is erased.
 
-    mkdir -p "$CHROOT/tmp/custom_kernel"
-    rm -rf "$CHROOT/tmp/custom_kernel/"*
-    cp -a "$KERNEL_SRC"/* "$CHROOT/tmp/custom_kernel/"
+HW_CPU_VENDOR=""; HW_CPU_NAME=""; HW_CPU_FLAGS=""; HW_CPU_UARCH=""
+HW_X86_LEVEL=1; HW_IS_VM=0
+HW_GPU_NVIDIA=0; HW_GPU_DESC=""
+HW_WIFI_DESC=""; HW_WANT_BCM_STA=0; HW_REALTEK_DKMS=""
+HW_WANT_NVIDIA=0
+HW_DRIVE_TYPE="unknown"; HW_DRIVE_DESC=""
+CPU_PKGS=""; GPU_PKGS=""; HW_FIRMWARE_PKGS=""; HW_FW_DIRS=""; DRIVE_PKGS=""
+KERNEL_URL=""; KERNEL_VARIANT_USED=""
+
+# add_word VAR w...   append words to a space-separated list (no duplicates)
+add_word() { local -n _ref="$1"; local w; shift; for w in "$@"; do [[ " $_ref " == *" $w "* ]] || _ref="${_ref:+$_ref }$w"; done; }
+# add_desc VAR text   append to a "; "-separated description
+add_desc() { local -n _ref="$1"; _ref="${_ref:+$_ref; }$2"; }
+
+# "class vendor device" (lowercase hex, no 0x) for every PCI device
+pci_scan() {
+    local d
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/class" ] || continue
+        printf '%s %s %s\n' "$(<"$d/class")" "$(<"$d/vendor")" "$(<"$d/device")" | sed 's/0x//g'
+    done
+}
+
+pci_name() {   # $1=vendor $2=device
+    local n=""
+    if command -v lspci >/dev/null 2>&1; then
+        n="$(lspci -d "$1:$2" 2>/dev/null | head -n1 | sed 's/^[^ ]* [^:]*: //' || true)"
+    fi
+    echo "${n:-PCI $1:$2}"
+}
+
+cpu_has() {   # cpu_has flag...   (all must be present)
+    local f
+    for f in "$@"; do [[ " $HW_CPU_FLAGS " == *" $f "* ]] || return 1; done
+    return 0
+}
+
+# x86-64 micro-architecture level (1-4) from the CPU flags
+x86_level() {
+    cpu_has cx16 lahf_lm popcnt sse4_1 sse4_2 ssse3 || { echo 1; return 0; }
+    cpu_has avx avx2 bmi1 bmi2 f16c fma abm movbe xsave || { echo 2; return 0; }
+    cpu_has avx512f avx512bw avx512cd avx512dq avx512vl || { echo 3; return 0; }
+    echo 4
+}
+
+# AMD family/model (decimal, as in /proc/cpuinfo) -> variant name used in the repo
+amd_uarch() {
+    local fam="$1" mod="$2"
+    case "$fam" in
+        15)    if cpu_has pni; then echo k8-sse3; else echo ""; fi ;;   # plain K8: generic build
+        16|18) echo amdfam10 ;;
+        21)    if   [ "$mod" -ge 96 ]; then echo excavator
+               elif [ "$mod" -ge 48 ]; then echo steamroller
+               elif [ "$mod" -ge 16 ] || [ "$mod" -eq 2 ]; then echo piledriver
+               else echo bulldozer; fi ;;
+        23)    if [ "$mod" -ge 48 ]; then echo zen2; else echo zen1; fi ;;
+        25)    if { [ "$mod" -ge 16 ] && [ "$mod" -le 31 ]; } || { [ "$mod" -ge 96 ] && [ "$mod" -le 127 ]; } || [ "$mod" -ge 160 ]
+               then echo zen4; else echo zen3; fi ;;
+        26)    echo zen5 ;;
+        *)     echo "" ;;   # bobcat/jaguar etc. have no tuned build: generic
+    esac
+}
+
+# Intel family 6 model/stepping (decimal) -> variant name used in the repo
+intel_uarch() {
+    case "$1" in
+        28|38|39|53|54)            echo atom-bonnell ;;
+        55|74|77|90|93)            echo atom-silvermont ;;
+        92|95|122|134|150|156)     echo atom-goldmont ;;
+        26|30|31|46)               echo nehalem ;;
+        37|44|47)                  echo westmere ;;
+        42|45)                     echo sandybridge ;;
+        58|62)                     echo ivybridge ;;
+        60|63|69|70)               echo haswell ;;
+        61|71|79|86)               echo broadwell ;;
+        78|94|142|158|165|166)     echo skylake ;;
+        85)                        if [ "${2:-0}" -ge 5 ]; then echo cascadelake; else echo skylake-avx512; fi ;;
+        106|108|125|126)           echo icelake ;;
+        167)                       echo rocketlake ;;
+        140|141)                   echo tigerlake ;;
+        151|154)                   echo alderlake ;;
+        183|186|191)               echo raptorlake ;;
+        170|172|189|197|198)       echo meteorlake ;;
+        143|207)                   echo sapphirerapids ;;
+        *)                         echo "" ;;   # core2 etc.: generic
+    esac
+}
+
+# Builds that can stand in for $1 (each is a subset of the CPU's features), best first.
+uarch_chain() {
+    case "$1" in
+        zen5)            echo zen5 zen4 zen3 zen2 zen1 ;;
+        zen4)            echo zen4 zen3 zen2 zen1 ;;
+        zen3)            echo zen3 zen2 zen1 ;;
+        zen2)            echo zen2 zen1 ;;
+        excavator)       echo excavator steamroller piledriver bulldozer ;;
+        steamroller)     echo steamroller piledriver bulldozer ;;
+        piledriver)      echo piledriver bulldozer ;;
+        meteorlake)      echo raptorlake alderlake ;;
+        raptorlake)      echo raptorlake alderlake ;;
+        sapphirerapids)  echo sapphirerapids icelake skylake-avx512 skylake ;;
+        rocketlake)      echo icelake skylake-avx512 skylake ;;
+        tigerlake)       echo tigerlake icelake skylake-avx512 skylake ;;
+        icelake)         echo icelake skylake-avx512 skylake ;;
+        cascadelake)     echo cascadelake skylake-avx512 skylake ;;
+        skylake-avx512)  echo skylake-avx512 skylake ;;
+        atom-goldmont)   echo atom-goldmont atom-silvermont ;;
+        "")              ;;
+        *)               echo "$1" ;;
+    esac
+}
+
+detect_cpu() {
+    local fam mod step
+    HW_CPU_VENDOR="$(awk -F': *' '/^vendor_id/ {print $2; exit}' /proc/cpuinfo || true)"
+    HW_CPU_NAME="$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo || true)"
+    HW_CPU_FLAGS="$(awk -F': *' '/^flags/ {print $2; exit}' /proc/cpuinfo || true)"
+    fam="$(awk -F': *' '/^cpu family/ {print $2; exit}' /proc/cpuinfo || true)"
+    step="$(awk -F': *' '/^stepping/ {print $2; exit}' /proc/cpuinfo || true)"
+    mod="$(awk -F': *' '/^model[ \t]*:/ {print $2; exit}' /proc/cpuinfo || true)"
+    [[ "$fam" =~ ^[0-9]+$ ]] || fam=0
+    [[ "$mod" =~ ^[0-9]+$ ]] || mod=0
+    [[ "$step" =~ ^[0-9]+$ ]] || step=0
+
+    HW_X86_LEVEL="$(x86_level)"
+    if cpu_has hypervisor; then HW_IS_VM=1; fi
+
+    case "$HW_CPU_VENDOR" in
+        GenuineIntel)
+            add_word CPU_PKGS intel-microcode
+            if [ "$fam" -eq 6 ]; then HW_CPU_UARCH="$(intel_uarch "$mod" "$step")"; fi ;;
+        AuthenticAMD)
+            add_word CPU_PKGS amd64-microcode
+            HW_CPU_UARCH="$(amd_uarch "$fam" "$mod")" ;;
+    esac
+
+    # In a VM the virtual CPU may hide features the host really has, so a
+    # microarch-tuned kernel is unsafe there; use the generic level instead.
+    if [ "$HW_IS_VM" -eq 1 ]; then HW_CPU_UARCH=""; CPU_PKGS=""; fi
+}
+
+detect_gpu() {
+    local cls ven dev nm
+    while read -r cls ven dev; do
+        case "$cls" in 03*) ;; *) continue ;; esac
+        nm="$(pci_name "$ven" "$dev")"
+        case "$ven" in
+            10de) HW_GPU_NVIDIA=1
+                  add_word GPU_PKGS firmware-nvidia-graphics
+                  add_desc HW_GPU_DESC "NVIDIA: $nm" ;;
+            1002) add_word GPU_PKGS firmware-amd-graphics xserver-xorg-video-amdgpu xserver-xorg-video-radeon
+                  add_word HW_FW_DIRS amdgpu radeon
+                  add_desc HW_GPU_DESC "AMD: $nm" ;;
+            8086) add_word GPU_PKGS intel-media-va-driver i965-va-driver
+                  add_desc HW_GPU_DESC "Intel: $nm" ;;
+            1af4|1234|15ad|80ee|1b36)
+                  add_desc HW_GPU_DESC "Virtual: $nm" ;;
+            *)    add_desc HW_GPU_DESC "$nm" ;;
+        esac
+    done < <(pci_scan)
+    add_word GPU_PKGS $MESA_PKGS
+    [ -n "$HW_GPU_DESC" ] || HW_GPU_DESC="none detected (using generic drivers)"
+}
+
+# wifi_add BUS VENDOR DEVICE|PRODUCT   (PCI-style vendor ids)
+wifi_add() {
+    local bus="$1" ven="$2" dev="$3" label nm
+    nm="$(pci_name "$ven" "$dev")"
+    [ "$bus" = pci ] || nm="USB $ven:$dev"
+    case "$ven" in
+        14e4)
+            add_word HW_FIRMWARE_PKGS firmware-brcm80211; add_word HW_FW_DIRS brcm
+            if [[ " $BCM_STA_IDS " == *" $dev "* ]]; then
+                HW_WANT_BCM_STA=1; label="needs proprietary wl driver"
+            elif [[ " $BCM_SMAC_IDS " == *" $dev "* ]]; then
+                [ "$HW_WANT_BCM_STA" = 1 ] || HW_WANT_BCM_STA=smac
+                label="brcmsmac (wl fallback if the kernel lacks it)"
+            else
+                label="brcmfmac + firmware"
+            fi
+            add_desc HW_WIFI_DESC "Broadcom: $nm [$label]" ;;
+        8086) add_word HW_FIRMWARE_PKGS firmware-iwlwifi; add_word HW_FW_DIRS iwlwifi
+              add_desc HW_WIFI_DESC "Intel: $nm" ;;
+        10ec) add_word HW_FIRMWARE_PKGS firmware-realtek
+              [ "$dev" = c821 ] && add_word HW_REALTEK_DKMS rtl8821ce-dkms
+              add_desc HW_WIFI_DESC "Realtek: $nm" ;;
+        168c|17cb)
+              add_word HW_FIRMWARE_PKGS firmware-atheros
+              add_desc HW_WIFI_DESC "Atheros/Qualcomm: $nm" ;;
+        14c3) add_word HW_FIRMWARE_PKGS firmware-mediatek
+              add_desc HW_WIFI_DESC "MediaTek: $nm" ;;
+        1814) add_word HW_FIRMWARE_PKGS firmware-ralink
+              add_desc HW_WIFI_DESC "Ralink: $nm" ;;
+        11ab) add_word HW_FIRMWARE_PKGS firmware-libertas firmware-misc-nonfree
+              add_desc HW_WIFI_DESC "Marvell: $nm" ;;
+        *)    add_desc HW_WIFI_DESC "$nm" ;;
+    esac
+    return 0
+}
+
+detect_wifi() {
+    local cls ven dev n d uv up
+    while read -r cls ven dev; do
+        case "$cls" in 0280*) wifi_add pci "$ven" "$dev" ;; esac
+    done < <(pci_scan)
+
+    # USB adapters: only visible if the live system already created a wireless interface
+    for n in /sys/class/net/*; do
+        { [ -d "$n/wireless" ] || [ -d "$n/phy80211" ]; } || continue
+        d="$(readlink -f "$n/device" 2>/dev/null || true)"
+        case "$d" in */usb*) ;; *) continue ;; esac
+        uv="$(cat "$d/../idVendor" 2>/dev/null || true)"; up="$(cat "$d/../idProduct" 2>/dev/null || true)"
+        case "$uv" in
+            0bda) wifi_add usb 10ec "$up" ;;
+            0cf3) wifi_add usb 168c "$up" ;;
+            148f) wifi_add usb 1814 "$up" ;;
+            0e8d) wifi_add usb 14c3 "$up" ;;
+            0a5c) wifi_add usb 14e4 "usb-$up" ;;
+            8086) wifi_add usb 8086 "$up" ;;
+        esac
+    done
+    [ -n "$HW_WIFI_DESC" ] || HW_WIFI_DESC="none detected"
+}
+
+detect_drive() {
+    local d name rot model size
+    d="$(readlink -f "$INSTALL_DISK")"; name="$(basename "$d")"
+    rot="$(cat "/sys/block/$name/queue/rotational" 2>/dev/null || echo 1)"
+    case "$name" in
+        nvme*)       HW_DRIVE_TYPE=nvme ;;
+        mmcblk*)     HW_DRIVE_TYPE=emmc ;;
+        vd*|xvd*)    HW_DRIVE_TYPE=virtual ;;
+        *)           if [ "$rot" = 0 ]; then HW_DRIVE_TYPE=ssd; else HW_DRIVE_TYPE=hdd; fi
+                     [ "$HW_IS_VM" -eq 1 ] && HW_DRIVE_TYPE=virtual ;;
+    esac
+    case "$HW_DRIVE_TYPE" in
+        nvme)    add_word DRIVE_PKGS nvme-cli smartmontools ;;
+        ssd)     add_word DRIVE_PKGS smartmontools ;;
+        hdd)     add_word DRIVE_PKGS hdparm smartmontools ;;
+        emmc)    add_word DRIVE_PKGS mmc-utils ;;
+    esac
+    model="$(lsblk -dno MODEL "$d" 2>/dev/null | sed 's/ *$//' || true)"
+    size="$(lsblk -dno SIZE "$d" 2>/dev/null | tr -d ' ' || true)"
+    HW_DRIVE_DESC="$d  ${size:-?}  ${model:-unknown model}"
+}
+
+detect_hardware() {
+    log "Detecting hardware"
+    CPU_PKGS=""; GPU_PKGS=""; HW_FIRMWARE_PKGS=""; HW_FW_DIRS=""; DRIVE_PKGS=""
+    HW_GPU_DESC=""; HW_WIFI_DESC=""; HW_WANT_BCM_STA=0; HW_REALTEK_DKMS=""; HW_GPU_NVIDIA=0
+    detect_cpu
+    detect_gpu
+    detect_wifi
+    detect_drive
+
+    case "$INCLUDE_NVIDIA_DRIVER" in
+        1) HW_WANT_NVIDIA=1 ;;
+        0) HW_WANT_NVIDIA=0 ;;
+        *) HW_WANT_NVIDIA="$HW_GPU_NVIDIA" ;;
+    esac
+    case "$INCLUDE_BROADCOM_STA" in
+        1) HW_WANT_BCM_STA=1 ;;
+        0) HW_WANT_BCM_STA=0 ;;
+    esac
+}
+
+hw_summary() {
+    local cpu_extra="x86-64-v$HW_X86_LEVEL" drv="" kern
+    [ -n "$HW_CPU_UARCH" ] && cpu_extra="$HW_CPU_UARCH, $cpu_extra"
+    [ "$HW_IS_VM" -eq 1 ] && cpu_extra="$cpu_extra, virtual machine"
+    [ -n "$CPU_PKGS" ] && drv="microcode ($CPU_PKGS)"
+    [ "$HW_WANT_NVIDIA" = 1 ] && drv="${drv:+$drv; }NVIDIA proprietary driver (picked by nvidia-detect)"
+    [ "$HW_WANT_BCM_STA" != 0 ] && drv="${drv:+$drv; }Broadcom wl driver"
+    [ -n "$HW_REALTEK_DKMS" ] && drv="${drv:+$drv; }$HW_REALTEK_DKMS"
+    if [ -n "$KERNEL_URL" ]; then kern="${KERNEL_URL##*/}"; else kern="ISO-bundled kernel"; fi
+    cat <<SUMMARY
+CPU:      ${HW_CPU_NAME:-unknown}
+          $cpu_extra
+GPU:      $HW_GPU_DESC
+Wi-Fi:    $HW_WIFI_DESC
+Drive:    $HW_DRIVE_DESC  [$HW_DRIVE_TYPE]
+Extras:   ${drv:-nothing special needed}
+Kernel:   $kern
+SUMMARY
+}
+
+show_hw_summary() {
+    [ "${INSTALL_YES:-0}" = "1" ] && { hw_summary; return 0; }
+    whiptail --title "$UI_TITLE" --msgbox "Detected hardware and what will be installed:\n\n$(hw_summary)" 20 78
+}
+
+write_hw_report() {
+    mkdir -p "$CHROOT/var/log"
+    { echo "Cephalo hardware report ($(date -u +%FT%TZ))"; echo; hw_summary; echo; } > "$CHROOT/var/log/cephalo-hardware.txt"
+}
+
+# ============================ KERNEL FROM THE REPO ============================
+
+# Candidate variants, best first: tuned microarch builds, then generic x86-64-v<N>.
+kernel_variant_candidates() {
+    local p="" n u
+    if [ -n "$KERNEL_VARIANT" ]; then echo "$KERNEL_VARIANT"; return 0; fi
+    if [ "$KERNEL_MODE" != "generic" ] && [ -n "$HW_CPU_UARCH" ]; then
+        case "$HW_CPU_VENDOR" in AuthenticAMD) p=amd ;; GenuineIntel) p=intel ;; esac
+        for u in $(uarch_chain "$HW_CPU_UARCH"); do
+            echo "$p-$u"
+        done
+    fi
+    for ((n = HW_X86_LEVEL; n >= 1; n--)); do echo "v$n"; done
+}
+
+resolve_kernel() {
+    KERNEL_URL=""; KERNEL_VARIANT_USED=""
+    if [ "$KERNEL_MODE" = "bundled" ]; then
+        log "Kernel: using the ISO-bundled kernel (KERNEL_MODE=bundled)"
+        return 0
+    fi
+    log "Looking for the best kernel in $KERNEL_REPO"
+    local api base assets cand best
+    api="https://api.github.com/repos/$KERNEL_REPO/releases/tags/$KERNEL_TAG"
+    base="https://github.com/$KERNEL_REPO/releases/download/$KERNEL_TAG"
+    assets="$(wget -qO- --timeout=15 --tries=2 "$api" 2>/dev/null \
+                | grep -oE '"name": *"[^"]+\.tar\.zst"' | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+
+    for cand in $(kernel_variant_candidates); do
+        best=""
+        if [ -n "$assets" ]; then
+            best="$(printf '%s\n' "$assets" | grep -F -- "-x86-64-${cand}.tar.zst" | sort -V | tail -n1 || true)"
+        elif [ -n "$KERNEL_PIN" ]; then
+            best="${KERNEL_PIN}-x86-64-${cand}.tar.zst"
+            wget -q --spider --timeout=15 --tries=2 "$base/$best" 2>/dev/null || best=""
+        fi
+        if [ -n "$best" ]; then
+            KERNEL_URL="$base/$best"; KERNEL_VARIANT_USED="$cand"
+            echo "Selected kernel: $best"
+            return 0
+        fi
+    done
+    echo "WARNING: no matching kernel found in the repo (or it is unreachable)." >&2
+}
+
+# Called with the target mounted: download the chosen kernel, stage the ISO copy as a fallback.
+prepare_custom_kernel() {
+    mkdir -p "$CHROOT/tmp"
+    if [ -n "$KERNEL_URL" ]; then
+        log "Downloading kernel ${KERNEL_URL##*/}"
+        if ! wget -q --show-progress --timeout=30 --tries=3 -O "$CHROOT/tmp/cephalo-kernel.tar.zst" "$KERNEL_URL"; then
+            echo "WARNING: kernel download failed; using the ISO-bundled kernel." >&2
+            rm -f "$CHROOT/tmp/cephalo-kernel.tar.zst"; KERNEL_URL=""; KERNEL_VARIANT_USED=""
+        fi
+    fi
+    if [ -d "$PAYLOAD_DIR/kernel" ]; then
+        mkdir -p "$CHROOT/tmp/custom_kernel_bundled"
+        cp -a "$PAYLOAD_DIR/kernel"/. "$CHROOT/tmp/custom_kernel_bundled/"
+    fi
+    [ -f "$CHROOT/tmp/cephalo-kernel.tar.zst" ] || [ -d "$CHROOT/tmp/custom_kernel_bundled" ] \
+        || die "No kernel available (download failed and nothing is bundled at $PAYLOAD_DIR/kernel)."
+}
+
+# Called with the target mounted: fetch the Plymouth theme archive (non-fatal).
+prepare_splash() {
+    [ "$INSTALL_SPLASH" = "1" ] || return 0
+    mkdir -p "$CHROOT/tmp"
+    log "Downloading boot splash theme ${SPLASH_URL##*/}"
+    if ! wget -q --show-progress --timeout=30 --tries=3 -O "$CHROOT/tmp/cephalo-splash.tar.zst" "$SPLASH_URL"; then
+        echo "WARNING: boot splash download failed; Plymouth will use its stock theme." >&2
+        rm -f "$CHROOT/tmp/cephalo-splash.tar.zst"
+    fi
+}
+
+# Kernel options Plymouth needs. Warn-only: the install still completes.
+check_kernel_splash() {
+    [ "$INSTALL_SPLASH" = "1" ] || return 0
+    local cfg opt miss=""
+    cfg="$(ls -1 "$CHROOT"/boot/config-* 2>/dev/null | sort -V | tail -n1 || true)"
+    [ -n "$cfg" ] || { echo "NOTE: no kernel config found; could not verify Plymouth kernel support." >&2; return 0; }
+    for opt in VT DEVTMPFS TMPFS UNIX; do
+        grep -Eq "^CONFIG_${opt}=(y|m)$" "$cfg" || miss="$miss CONFIG_$opt"
+    done
+    if ! grep -Eq '^CONFIG_DRM=(y|m)$' "$cfg" && ! grep -Eq '^CONFIG_FB=(y|m)$' "$cfg"; then
+        miss="$miss CONFIG_DRM(or CONFIG_FB)"
+    fi
+    grep -Eq '^CONFIG_DRM_FBDEV_EMULATION=(y|m)$|^CONFIG_FRAMEBUFFER_CONSOLE=(y|m)$' "$cfg" \
+        || miss="$miss CONFIG_DRM_FBDEV_EMULATION/CONFIG_FRAMEBUFFER_CONSOLE"
+    if [ -n "$miss" ]; then
+        printf '\033[1;33mNOTE: the kernel lacks options Plymouth relies on:%s. The boot splash may not display.\033[0m\n' "$miss" >&2
+    else
+        echo "Kernel Plymouth options: all present."
+    fi
+}
+
+configure_grub_splash() {
+    [ "$INSTALL_SPLASH" = "1" ] || return 0
+
+    if ! chroot "$CHROOT" dpkg -s plymouth >/dev/null 2>&1; then
+        echo "WARNING: Plymouth is not installed in the target; leaving the kernel command line alone." >&2
+        return 0
+    fi
+
+    log "Configuring GRUB for the boot splash"
+
+    local f="$CHROOT/etc/default/grub" cur
+    [ -f "$f" ] || : > "$f"
+
+    cur="$(sed -n 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"[[:space:]]*$/\1/p' "$f" | tail -n1)"
+
+    for w in quiet splash vt.global_cursor_default=0; do
+        [[ " $cur " == *" $w "* ]] || cur="${cur:+$cur }$w"
+    done
+
+    sed -i \
+        '/^GRUB_CMDLINE_LINUX_DEFAULT=/d;
+         /^GRUB_GFXPAYLOAD_LINUX=/d;
+         /^GRUB_GFXMODE=/d;
+         /^GRUB_TIMEOUT_STYLE=/d;
+         /^GRUB_TIMEOUT=/d' "$f"
+
+    {
+        printf 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n' "$cur"
+        echo 'GRUB_GFXMODE=auto'
+        echo 'GRUB_GFXPAYLOAD_LINUX=keep'
+
+        # Hide the GRUB menu for seamless boot
+        echo 'GRUB_TIMEOUT_STYLE=hidden'
+        echo 'GRUB_TIMEOUT=0'
+    } >> "$f"
 }
 
 debootstrap_base() {
@@ -167,70 +642,176 @@ cat > /etc/hosts <<EOF
 127.0.1.1   $INSTALL_HOSTNAME
 EOF
 
-# --- Custom Kernel Installation ---
-echo "Installing custom kernel from staged files..."
-if ls /tmp/custom_kernel/*.deb >/dev/null 2>&1; then
-    apt-get install -y /tmp/custom_kernel/*.deb
-else
-    cp -f /tmp/custom_kernel/vmlinuz-* /boot/ 2>/dev/null || true
-    cp -f /tmp/custom_kernel/initrd.img-* /boot/ 2>/dev/null || true
-    cp -f /tmp/custom_kernel/System.map-* /boot/ 2>/dev/null || true
-    cp -f /tmp/custom_kernel/config-* /boot/ 2>/dev/null || true
+# --- helpers -----------------------------------------------------------------
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+hwnote() { echo "\$*" | tee -a /var/log/cephalo-hardware.txt >&2; }
+try_install() {
+    local p failed=""
+    for p in "\$@"; do
+        apt-get install -y "\$p" || failed="\$failed \$p"
+    done
+    if [ -n "\$failed" ]; then hwnote "WARNING: failed to install:\$failed (continuing without them)"; fi
+    return 0
+}
+# DKMS packages: if one fails to build, purge it again so apt/dpkg stay healthy.
+dkms_install() {
+    local p
+    for p in "\$@"; do
+        if ! apt-get install -y "\$p"; then
+            hwnote "WARNING: \$p failed to install/build for kernel \$CKVER; removing it"
+            apt-get purge -y "\$p" || true
+            apt-get autoremove -y --purge || true
+            dpkg --configure -a || true
+        fi
+    done
+}
 
-    if [ -d /tmp/custom_kernel/lib/modules ]; then
-        mkdir -p /lib/modules
-        cp -a /tmp/custom_kernel/lib/modules/* /lib/modules/
+# --- Custom kernel (downloaded tarball preferred, ISO-bundled copy as fallback) ---
+flatten_kernel_dir() {
+    local d="\$1" only
+    while [ "\$(find "\$d" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]; do
+        only="\$(find "\$d" -mindepth 1 -maxdepth 1)"
+        [ -d "\$only" ] || break
+        case "\$(basename "\$only")" in boot|lib|lib64|usr|etc) break ;; esac
+        d="\$only"
+    done
+    echo "\$d"
+}
+reset_kernel_files() {
+    rm -f /boot/vmlinuz-* /boot/initrd.img-* /boot/System.map-* /boot/config-*
+    rm -rf /lib/modules/*
+}
+kernel_ok() { ls /boot/vmlinuz-* >/dev/null 2>&1 && [ -n "\$(ls -A /lib/modules 2>/dev/null)" ]; }
+install_kernel_from() {
+    local d m
+    d="\$(flatten_kernel_dir "\$1")"
+    if ls "\$d"/*.deb >/dev/null 2>&1; then
+        apt-get install -y "\$d"/*.deb || return 1
+        return 0
     fi
-    if [ -d /tmp/custom_kernel/usr/src ]; then
-        mkdir -p /usr/src
-        cp -a /tmp/custom_kernel/usr/src/* /usr/src/ 2>/dev/null || true
+    # rootfs-style tarball (boot/, lib/modules/, usr/src/) or a flat directory
+    if [ -d "\$d/boot" ]; then cp -a "\$d/boot/." /boot/; fi
+    cp -f "\$d"/vmlinuz-* "\$d"/initrd.img-* "\$d"/System.map-* "\$d"/config-* /boot/ 2>/dev/null || true
+    mkdir -p /lib/modules
+    for m in "\$d/lib/modules" "\$d/usr/lib/modules"; do
+        if [ -d "\$m" ]; then cp -a "\$m"/. /lib/modules/; fi
+    done
+    if [ -d "\$d/usr/src" ]; then mkdir -p /usr/src; cp -a "\$d/usr/src"/. /usr/src/; fi
+    return 0
+}
+
+KERNEL_DONE=0
+if [ -f /tmp/cephalo-kernel.tar.zst ]; then
+    echo "Installing downloaded kernel ($KERNEL_VARIANT_USED)..."
+    rm -rf /tmp/kernel_dl; mkdir -p /tmp/kernel_dl
+    if tar --zstd -xf /tmp/cephalo-kernel.tar.zst -C /tmp/kernel_dl && install_kernel_from /tmp/kernel_dl && kernel_ok; then
+        KERNEL_DONE=1
+    else
+        echo "WARNING: downloaded kernel could not be installed; falling back to the ISO-bundled kernel" >&2
+        reset_kernel_files
     fi
+    rm -rf /tmp/kernel_dl /tmp/cephalo-kernel.tar.zst
 fi
-rm -rf /tmp/custom_kernel
+if [ "\$KERNEL_DONE" -eq 0 ] && [ -d /tmp/custom_kernel_bundled ]; then
+    echo "Installing ISO-bundled kernel..."
+    if install_kernel_from /tmp/custom_kernel_bundled && kernel_ok; then KERNEL_DONE=1; fi
+fi
+rm -rf /tmp/custom_kernel_bundled
+if [ "\$KERNEL_DONE" -ne 1 ]; then echo "ERROR: no kernel could be installed" >&2; exit 1; fi
 
-# --- Broad hardware enablement: CPU microcode + firmware blobs -----------
-FAILED_UCODE=""
-for pkg in $MICROCODE_PKGS; do
-    apt-get install -y "\$pkg" || FAILED_UCODE="\$FAILED_UCODE \$pkg"
-done
-[ -n "\$FAILED_UCODE" ] && echo "WARNING: failed to install:\$FAILED_UCODE" >&2
+CKVER="\$(ls /lib/modules | sort -V | tail -n1)"
+echo "\$CKVER" > /root/.cephalo-kver
+HAVE_HEADERS=0
+[ -e "/lib/modules/\$CKVER/build/Makefile" ] && HAVE_HEADERS=1
+hwnote "Kernel: \$CKVER  (variant: ${KERNEL_VARIANT_USED:-ISO-bundled}, headers present: \$HAVE_HEADERS)"
 
-FAILED_FW=""
-for pkg in $FIRMWARE_CORE_PKGS $FIRMWARE_EXTRA_PKGS; do
-    apt-get install -y "\$pkg" || FAILED_FW="\$FAILED_FW \$pkg"
-done
-[ -n "\$FAILED_FW" ] && echo "WARNING: failed to install:\$FAILED_FW (continuing without them)" >&2
+# --- Hardware-specific packages (chosen by the installer's detection) ----------
+# CPU microcode: only the vendor that matches (none inside a VM)
+try_install $CPU_PKGS
 
-for fwdir in amdgpu radeon brcm iwlwifi ; do
+# Firmware: base set + whatever the detected Wi-Fi / GPU needs
+if [ "$INSTALL_ALL_FIRMWARE" = "1" ]; then
+    try_install $FIRMWARE_CORE_PKGS $FIRMWARE_EXTRA_PKGS
+else
+    try_install $FIRMWARE_BASE_PKGS $HW_FIRMWARE_PKGS
+fi
+
+for fwdir in $HW_FW_DIRS ; do
     if [ -d "/lib/firmware/\$fwdir" ] && [ -n "\$(ls -A "/lib/firmware/\$fwdir" 2>/dev/null)" ]; then
         FWCOUNT=\$(ls -1 "/lib/firmware/\$fwdir" | wc -l)
         echo "firmware check: /lib/firmware/\$fwdir populated (\$FWCOUNT files)"
     else
-        echo "WARNING: /lib/firmware/\$fwdir is missing or empty — matching hardware will fail to init" >&2
+        hwnote "WARNING: /lib/firmware/\$fwdir is missing or empty — matching hardware will fail to init"
     fi
 done
 
-apt-get install -y $DKMS_PKGS
+# GPU userspace (Mesa, VA-API, vendor X drivers) and drive tools
+try_install $GPU_PKGS
+try_install $DRIVE_PKGS
 
-if [ "$INCLUDE_BROADCOM_STA" = "1" ]; then
-    echo "Attempting Broadcom STA driver installation..."
-    if ! apt-get install -y $BROADCOM_STA_PKGS; then
-        echo "WARNING: broadcom-sta-dkms failed to install/build (missing custom kernel headers). Purging package to unblock package manager..." >&2
-        apt-get purge -y $BROADCOM_STA_PKGS || true
-        BCM_BLACKLIST_FILES=\$(dpkg -L broadcom-sta-dkms 2>/dev/null | grep '^/etc/modprobe\.d/' || true)
-        if [ -n "\$BCM_BLACKLIST_FILES" ]; then
-            rm -f \$BCM_BLACKLIST_FILES
+# --- Out-of-tree drivers (DKMS): Broadcom wl, NVIDIA, Realtek ------------------
+BCM_STA="$HW_WANT_BCM_STA"
+if [ "\$BCM_STA" = "smac" ]; then
+    if grep -qsE '^CONFIG_BRCMSMAC=(y|m)\$' "/boot/config-\$CKVER"; then
+        BCM_STA=0
+    else
+        BCM_STA=1
+        hwnote "Kernel has no brcmsmac driver: using the Broadcom STA (wl) driver instead"
+    fi
+fi
+RT_DKMS="$HW_REALTEK_DKMS"
+if [ -n "\$RT_DKMS" ] && grep -qsE '^CONFIG_RTW88_8821CE=(y|m)\$' "/boot/config-\$CKVER"; then RT_DKMS=""; fi
+
+if [ "\$BCM_STA" = "1" ] || [ "$HW_WANT_NVIDIA" = "1" ] || [ -n "\$RT_DKMS" ]; then
+    if [ "\$HAVE_HEADERS" != "1" ]; then
+        hwnote "WARNING: this kernel ships no headers (/lib/modules/\$CKVER/build), so DKMS drivers (Broadcom wl / NVIDIA / Realtek) cannot be built. Falling back to in-kernel drivers (nouveau etc.). Add headers to the kernel tarball to enable them."
+    else
+        apt-get install -y $DKMS_PKGS
+
+        # The chroot would otherwise report the *live ISO's* kernel to DKMS. Make
+        # 'uname -r' return the installed custom kernel while the drivers build.
+        cat > /usr/local/bin/uname <<'EOS'
+#!/bin/sh
+if [ "\$1" = "-r" ] && [ -s /root/.cephalo-kver ]; then cat /root/.cephalo-kver; else exec /usr/bin/uname "\$@"; fi
+EOS
+        chmod +x /usr/local/bin/uname
+
+        if [ "\$BCM_STA" = "1" ]; then
+            hwnote "Broadcom Wi-Fi that needs the proprietary driver: installing $BROADCOM_STA_PKGS"
+            dkms_install $BROADCOM_STA_PKGS
         fi
-    fi
-fi
 
-if [ "$INCLUDE_NVIDIA_DRIVER" = "1" ]; then
-    echo "Attempting NVIDIA driver installation..."
-    if ! apt-get install -y $NVIDIA_PKGS; then
-        echo "WARNING: nvidia-driver failed to install. Purging package to unblock package manager..." >&2
-        apt-get purge -y $NVIDIA_PKGS || true
+        if [ -n "\$RT_DKMS" ]; then
+            hwnote "Realtek 8821CE Wi-Fi and the kernel has no rtw88 driver for it: installing \$RT_DKMS"
+            dkms_install \$RT_DKMS
+        fi
+
+        if [ "$HW_WANT_NVIDIA" = "1" ]; then
+            apt-get install -y nvidia-detect || true
+            NV_PKG="$NVIDIA_DRIVER_PKG"
+            if [ -z "\$NV_PKG" ]; then
+                NV_PKG="\$(nvidia-detect 2>/dev/null | awk '/recommended to install the/ {getline; print \$1; exit}' || true)"
+            fi
+            case "\$NV_PKG" in nvidia-*driver) ;; *) NV_PKG="" ;; esac
+            if [ -n "\$NV_PKG" ]; then
+                hwnote "NVIDIA: nvidia-detect selected \$NV_PKG"
+                dkms_install "\$NV_PKG"
+                if dpkg -s "\$NV_PKG" >/dev/null 2>&1; then
+                    echo "options nvidia-drm modeset=1" > /etc/modprobe.d/cephalo-nvidia-drm.conf
+                    try_install libnvidia-egl-wayland1
+                fi
+            else
+                hwnote "NVIDIA: no proprietary driver supports this GPU (or nvidia-detect found none); using nouveau"
+            fi
+        fi
+
+        # Make sure every DKMS module is built for the installed kernel
+        dkms autoinstall -k "\$CKVER" || true
+        dkms status || true
+        rm -f /usr/local/bin/uname
     fi
 fi
+rm -f /root/.cephalo-kver
 
 # Display manager (X greeter) + labwc (Wayland session)
 apt-get install -y $DISPLAY_PKGS
@@ -279,7 +860,7 @@ if command -v convert >/dev/null 2>&1; then
     convert -size 1920x1080 gradient:'#1e1e2e-#313244' /usr/share/backgrounds/cephalo-gradient.png || true
 fi
 
-mkdir -p /etc/skel/.config/labwc /etc/skel/.config/waybar /etc/skel/.config/mako \
+mkdir -p /etc/skel/.config/labwc /etc/skel/.config/yambar /etc/skel/.config/mako \
          /etc/skel/.config/gtk-3.0
 
 cat > /etc/skel/.config/labwc/autostart <<'EOF'
@@ -294,13 +875,16 @@ command -v dbus-update-activation-environment >/dev/null 2>&1 && \\
 command -v systemctl >/dev/null 2>&1 && \\
     systemctl --user --no-block start pipewire.service wireplumber.service pipewire-pulse.service
 
-if [ -f /usr/share/backgrounds/cephalo-gradient.png ] && command -v swaybg >/dev/null 2>&1; then
+if command -v cephalo-wallpaper >/dev/null 2>&1; then
+    # per-monitor wallpaper sized to each screen; keeps running to follow hot-plug
+    cephalo-wallpaper &
+elif [ -f /usr/share/backgrounds/cephalo-gradient.png ] && command -v swaybg >/dev/null 2>&1; then
     swaybg -i /usr/share/backgrounds/cephalo-gradient.png -m fill &
 elif command -v swaybg >/dev/null 2>&1; then
     swaybg -c 1e1e2e &
 fi
 
-command -v waybar >/dev/null 2>&1 && waybar &
+command -v yambar >/dev/null 2>&1 && yambar &
 command -v mako >/dev/null 2>&1 && mako &
 
 for agent in \
@@ -317,8 +901,9 @@ do
     fi
 done
 
-command -v nm-applet >/dev/null 2>&1 && nm-applet --indicator &
-# Blueman applet = Bluetooth pairing agent (PIN / passkey prompts) + notifications
+# (no nm-applet: yambar has no tray. Wi-Fi is handled by cephalo-wifi-menu instead.)
+# Blueman applet = Bluetooth pairing agent (PIN / passkey prompts) + notifications.
+# It is started for the agent only; there is no tray icon to show.
 command -v blueman-applet >/dev/null 2>&1 && blueman-applet &
 command -v xfce4-power-manager >/dev/null 2>&1 && xfce4-power-manager &
 EOF
@@ -349,6 +934,7 @@ cat > /etc/skel/.config/labwc/rc.xml <<'EOF'
     <keybind key="W-q"><action name="Close"/></keybind>
     <keybind key="A-Tab"><action name="NextWindow"/></keybind>
     <keybind key="W-b"><action name="Execute" command="cephalo-bt-menu"/></keybind>
+    <keybind key="W-w"><action name="Execute" command="cephalo-wifi-menu"/></keybind>
     <keybind key="XF86AudioRaiseVolume"><action name="Execute" command="wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"/></keybind>
     <keybind key="XF86AudioLowerVolume"><action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"/></keybind>
     <keybind key="XF86AudioMute"><action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"/></keybind>
@@ -376,88 +962,98 @@ cat > /etc/skel/.config/labwc/menu.xml <<'EOF'
 </openbox_menu>
 EOF
 
-cat > /etc/skel/.config/waybar/config <<'EOF'
-{
-    "layer": "top",
-    "position": "top",
-    "height": 32,
-    "modules-left": ["custom/launcher"],
-    "modules-center": ["clock"],
-    "modules-right": ["pulseaudio", "custom/bluetooth", "network", "cpu", "memory", "tray"],
-    "custom/launcher": {
-        "format": "Apps",
-        "on-click": "wofi --show drun",
-        "tooltip": false
-    },
-    "clock": {
-        "format": "{:%a %d %b  %H:%M}"
-    },
-    "custom/bluetooth": {
-        "exec": "cephalo-bt-status",
-        "return-type": "json",
-        "interval": 10,
-        "signal": 8,
-        "tooltip": true,
-        "on-click": "cephalo-bt-menu",
-        "on-click-right": "blueman-manager"
-    },
-    "pulseaudio": {
-        "format": "Vol {volume}%",
-        "format-muted": "Muted",
-        "format-bluetooth": "BT Vol {volume}%",
-        "format-bluetooth-muted": "BT Muted",
-        "scroll-step": 5,
-        "on-click": "pavucontrol",
-        "on-click-right": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
-    },
-    "network": {
-        "format-wifi": "Wi-Fi: {essid}",
-        "format-ethernet": "Wired: {ifname}",
-        "format-disconnected": "Offline"
-    },
-    "cpu": {
-        "format": "CPU {usage}%"
-    },
-    "memory": {
-        "format": "Mem {}%"
-    },
-    "tray": {
-        "spacing": 8
-    }
-}
-EOF
+cat > /etc/skel/.config/yambar/config.yml <<'EOF'
+# Cephalo status bar (yambar): clock, Wi-Fi and Bluetooth. Colours are RRGGBBAA.
+#   Wi-Fi:      left-click = network menu (Super+W)   right-click = connection editor
+#   Bluetooth:  left-click = device menu  (Super+B)   right-click = Blueman
+# yambar does not run click handlers through a shell, so use absolute paths.
 
-cat > /etc/skel/.config/waybar/style.css <<'EOF'
-* {
-    font-family: "Noto Sans", "FontAwesome", sans-serif;
-    font-size: 13px;
-}
-window#waybar {
-    background-color: rgba(30, 30, 46, 0.9);
-    color: #cdd6f4;
-}
-#custom-launcher, #clock, #network, #cpu, #memory, #tray, #pulseaudio, #custom-bluetooth {
-    padding: 0 10px;
-}
-#custom-launcher {
-    color: #89b4fa;
-    font-weight: bold;
-}
-#custom-bluetooth.off, #custom-bluetooth.missing {
-    color: #6c7086;
-}
-#custom-bluetooth.connected {
-    color: #89b4fa;
-}
-#custom-bluetooth.low {
-    color: #f9e2af;
-}
-#custom-bluetooth.critical {
-    color: #f38ba8;
-}
-#pulseaudio.muted {
-    color: #6c7086;
-}
+wifi-click: &wifi-click
+  left: /usr/local/bin/cephalo-wifi-menu
+  right: /usr/bin/nm-connection-editor
+
+bt-click: &bt-click
+  left: /usr/local/bin/cephalo-bt-menu
+  right: /usr/bin/blueman-manager
+
+bar:
+  location: top
+  layer: top
+  height: 32
+  background: 1e1e2ee6
+  foreground: cdd6f4ff
+  font: "Noto Sans:pixelsize=13, FontAwesome:pixelsize=13"
+  left-margin: 10
+  right-margin: 10
+  spacing: 10
+
+  center:
+    - clock:
+        date-format: "%a %d %b"
+        time-format: "%H:%M"
+        content:
+          - string:
+              text: "{date}  {time}"
+
+  right:
+    # Wi-Fi: cephalo-wifi-status prints  state (wifi|ethernet|connecting|
+    # disconnected|off|missing)  and  label.
+    - script:
+        path: /usr/local/bin/cephalo-wifi-status
+        content:
+          map:
+            conditions:
+              state == wifi:
+                string:
+                  text: "\uf1eb  {label}"
+                  foreground: 89b4faff
+                  on-click: *wifi-click
+              state == ethernet:
+                string:
+                  text: "\uf1eb  {label}"
+                  on-click: *wifi-click
+              state == connecting:
+                string:
+                  text: "\uf1eb  {label}"
+                  foreground: f9e2afff
+                  on-click: *wifi-click
+            default:
+              string:
+                text: "\uf1eb  {label}"
+                foreground: 6c7086ff
+                on-click: *wifi-click
+
+    # Bluetooth: cephalo-bt-status prints  state (connected|on|off|missing),
+    # label (battery % of connected devices) and the bools  low  /  critical.
+    - script:
+        path: /usr/local/bin/cephalo-bt-status
+        content:
+          map:
+            conditions:
+              critical:
+                string:
+                  text: "\uf293  {label}"
+                  foreground: f38ba8ff
+                  on-click: *bt-click
+              low:
+                string:
+                  text: "\uf293  {label}"
+                  foreground: f9e2afff
+                  on-click: *bt-click
+              state == connected:
+                string:
+                  text: "\uf293  {label}"
+                  foreground: 89b4faff
+                  on-click: *bt-click
+              state == on:
+                string:
+                  text: "\uf293  {label}"
+                  on-click: *bt-click
+            default:
+              string:
+                text: "\uf293  {label}"
+                foreground: 6c7086ff
+                on-click: *bt-click
 EOF
 
 cat > /etc/skel/.config/mako/config <<'EOF'
@@ -487,12 +1083,97 @@ cat > /etc/lightdm/lightdm.conf.d/50-session.conf <<EOF
 [Seat:*]
 user-session=labwc
 EOF
+# --- Plymouth boot splash ----------------------------------------------------
+# Installed after the kernel and every other package so the single initramfs
+# rebuild just below picks up the theme for every installed kernel.
+if [ "$INSTALL_SPLASH" = "1" ]; then
+    if apt-get install -y $PLYMOUTH_PKGS; then
+        try_install $PLYMOUTH_EXTRA_PKGS
+
+        SPLASH_NAME="$SPLASH_THEME"
+        if [ -f /tmp/cephalo-splash.tar.zst ]; then
+            rm -rf /tmp/splash_dl; mkdir -p /tmp/splash_dl
+            if tar --zstd -xf /tmp/cephalo-splash.tar.zst -C /tmp/splash_dl; then
+                if [ -n "\$SPLASH_NAME" ]; then
+                    PFILE="\$(find /tmp/splash_dl -type f -name "\$SPLASH_NAME.plymouth" | head -n1)"
+                else
+                    PFILE="\$(find /tmp/splash_dl -type f -name '*.plymouth' | sort | head -n1)"
+                fi
+                if [ -n "\$PFILE" ]; then
+                    SPLASH_NAME="\$(basename "\$PFILE" .plymouth)"
+                    SPLASH_DEST="/usr/share/plymouth/themes/\$SPLASH_NAME"
+                    rm -rf "\$SPLASH_DEST"; mkdir -p "\$SPLASH_DEST"
+                    cp -a "\$(dirname "\$PFILE")"/. "\$SPLASH_DEST"/
+                    # make sure the theme's own paths point at where it now lives
+                    sed -i -E "/^(ImageDir|ScriptFile)=/ s#/usr/share/plymouth/themes/[^/]+#/usr/share/plymouth/themes/\$SPLASH_NAME#" "\$SPLASH_DEST/\$SPLASH_NAME.plymouth"
+                    chown -R root:root "\$SPLASH_DEST"
+                    find "\$SPLASH_DEST" -type d -exec chmod 755 {} +
+                    find "\$SPLASH_DEST" -type f -exec chmod 644 {} +
+                    hwnote "Boot splash theme installed: \$SPLASH_NAME"
+                    hwnote "--- \$SPLASH_NAME.plymouth ---"
+                    hwnote "\$(cat "\$SPLASH_DEST/\$SPLASH_NAME.plymouth")"
+                    hwnote "--- theme files: \$(ls "\$SPLASH_DEST" | wc -l) ---"
+                    SPLASH_MOD="\$(sed -n 's/^ModuleName=[[:space:]]*//p' "\$SPLASH_DEST/\$SPLASH_NAME.plymouth" | head -n1)"
+                    if [ -n "\$SPLASH_MOD" ] && ! ls /usr/lib/*/plymouth/"\$SPLASH_MOD".so /usr/lib/plymouth/"\$SPLASH_MOD".so >/dev/null 2>&1; then
+                        hwnote "WARNING: Plymouth plugin '\$SPLASH_MOD' (needed by the theme) is not installed"
+                    fi
+                else
+                    SPLASH_NAME=""
+                    hwnote "WARNING: the splash archive holds no .plymouth theme file; using Plymouth's stock theme"
+                fi
+            else
+                SPLASH_NAME=""
+                hwnote "WARNING: could not extract the splash archive; using Plymouth's stock theme"
+            fi
+            rm -rf /tmp/splash_dl /tmp/cephalo-splash.tar.zst
+        else
+            SPLASH_NAME=""
+        fi
+
+        # Make the splash theme the default (no -R: that would rebuild the initramfs
+        # for the live ISO's kernel, not ours; the loop below does the right rebuild).
+        # (capture the list first: 'plymouth-set-default-theme -l | grep -q' can die of SIGPIPE under pipefail)
+        THEME_LIST="\$(plymouth-set-default-theme --list 2>/dev/null || true)"
+        if [ -n "\$SPLASH_NAME" ] && printf '%s\\n' "\$THEME_LIST" | grep -qx "\$SPLASH_NAME"; then
+            plymouth-set-default-theme "\$SPLASH_NAME"
+            mkdir -p /etc/plymouth
+            cat > /etc/plymouth/plymouthd.conf <<EOP
+[Daemon]
+Theme=\$SPLASH_NAME
+ShowDelay=0
+DeviceTimeout=8
+EOP
+            hwnote "Plymouth default theme: \$SPLASH_NAME"
+        elif [ -n "\$SPLASH_NAME" ]; then
+            hwnote "WARNING: Plymouth does not list theme \$SPLASH_NAME; leaving the stock theme"
+        fi
+
+        # Bring up the framebuffer / KMS as early as possible so the splash shows from the start
+        mkdir -p /etc/initramfs-tools/conf.d
+        echo "FRAMEBUFFER=y" > /etc/initramfs-tools/conf.d/cephalo-splash
+    else
+        hwnote "WARNING: Plymouth could not be installed; the system will boot without a splash"
+    fi
+fi
+
 # --- Force Initramfs Creation for Custom Kernels ---
 if [ -d /lib/modules ]; then
     for kvers in \$(ls /lib/modules); do
         echo "Generating initramfs for kernel version: \$kvers"
         depmod -a "\$kvers" || true
         update-initramfs -c -k "\$kvers" || update-initramfs -u -k "\$kvers" || true
+    done
+fi
+
+# Verify the splash theme really is inside each initramfs
+if [ -n "\${SPLASH_NAME:-}" ]; then
+    for initrd in /boot/initrd.img-*; do
+        [ -e "\$initrd" ] || continue
+        if lsinitramfs "\$initrd" 2>/dev/null | grep -q "plymouth/themes/\$SPLASH_NAME/"; then
+            hwnote "initramfs OK (contains theme \$SPLASH_NAME): \$initrd"
+        else
+            hwnote "WARNING: theme \$SPLASH_NAME is NOT in \$initrd -- the splash will not show for that kernel"
+        fi
     done
 fi
 
@@ -642,7 +1323,7 @@ confirm_erase() {
 
 $summary
 
-Boot mode:  $BOOT_MODE
+Boot mode:  $BOOT_MODE    Drive: $HW_DRIVE_TYPE    Kernel: ${KERNEL_VARIANT_USED:-ISO-bundled}
 Hostname:   $INSTALL_HOSTNAME
 User:       $INSTALL_USER
 
@@ -746,14 +1427,40 @@ install_bootloader() {
             || die "grub-install (BIOS) failed"
     fi
 
+    configure_grub_splash
     chroot "$CHROOT" update-grub
 
     ls "$CHROOT"/boot/vmlinuz-* >/dev/null 2>&1 || die "No kernel found in the installed system's /boot"
     grep -q '^menuentry' "$CHROOT/boot/grub/grub.cfg" || die "grub.cfg has no boot entries"
 }
 
+
+# Drive tuning for the detected type (SSD / NVMe / HDD / eMMC / virtual)
+configure_drive() {
+    log "Tuning for a $HW_DRIVE_TYPE drive"
+    # I/O scheduler picks itself per device at boot from the rotational flag, so
+    # the rules stay correct even if the disk is later moved to another machine.
+    put 644 "$CHROOT/etc/udev/rules.d/60-cephalo-ioscheduler.rules" <<'EOF2'
+# NVMe: the device does its own queueing
+ACTION=="add|change", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/scheduler}="none"
+# SATA/USB SSD and eMMC
+ACTION=="add|change", KERNEL=="sd[a-z]|mmcblk[0-9]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
+# Spinning disks: BFQ (if the kernel has it) plus a bigger readahead
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq", ATTR{queue/read_ahead_kb}="1024"
+EOF2
+    case "$HW_DRIVE_TYPE" in
+        nvme|ssd|emmc|virtual)
+            # weekly TRIM instead of the 'discard' mount option
+            chroot "$CHROOT" systemctl enable fstrim.timer \
+                || echo "WARNING: could not enable fstrim.timer" >&2 ;;
+        hdd)
+            # no TRIM on spinning disks; smartd (from smartmontools) watches the disk health
+            chroot "$CHROOT" systemctl enable smartmontools.service >/dev/null 2>&1 || true ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
-# Bluetooth: configuration, helper scripts, Waybar integration, kernel check
+# Bluetooth: configuration, helper scripts, yambar integration, kernel check
 # ---------------------------------------------------------------------------
 
 # put MODE DEST < content   (creates parent dirs)
@@ -840,94 +1547,88 @@ bt_note() {
     return 0
 }
 
-# Tell Waybar to refresh the Bluetooth module immediately (signal 8).
-bt_poke_bar() { pkill -RTMIN+8 -x waybar 2>/dev/null; return 0; }
+# Wake cephalo-bt-status (the yambar script module) so the bar refreshes immediately.
+bt_poke_bar() { pkill -USR1 -f /usr/local/bin/cephalo-bt-status 2>/dev/null; return 0; }
 EOF
 
-    # ---- Waybar module: status + per-device battery -----------------------
+    # ---- yambar module: status + per-device battery -----------------------
     put 755 "$CHROOT/usr/local/bin/cephalo-bt-status" <<'EOF'
 #!/usr/bin/env bash
-# Waybar custom module: prints one JSON line (text, tooltip, class).
+# yambar "script" module, continuous mode. Prints a tag set whenever something
+# changes:  state (connected|on|off|missing)  label  low  critical
+# cephalo-bt-menu sends SIGUSR1 to refresh immediately.
 . /usr/local/lib/cephalo/bt-lib.sh
 
-ICON="$(printf '\xef\x8a\x93')"   # Font Awesome "bluetooth"
+INTERVAL=10
+YPID=$PPID
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/cephalo-bt"
 mkdir -p "$STATE_DIR" 2>/dev/null
 
-# escape for Pango markup, then for JSON
-esc() {
-    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
-                           -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+trap 'exit 0' TERM INT HUP
+trap ':' USR1                      # just wakes the sleep below
+
+last=""
+# emit STATE LABEL LOW CRITICAL   (only prints when something changed)
+emit() {
+    local out nl=$'\n' lbl="${2//[|$'\n']/ }"
+    out="state|string|$1${nl}label|string|${lbl}${nl}low|bool|$3${nl}critical|bool|$4"
+    [ "$out" = "$last" ] && return 0
+    last="$out"
+    printf '%s\n\n' "$out"
 }
 
-emit() { printf '{"text":"%s","tooltip":"%s","class":%s}\n' "$1" "$2" "$3"; }
+collect() {
+    local mac name pct flag count=0 lowest=101 joined="" label low=false crit=false
 
-HINT='<i>Left-click: manage devices  |  Right-click: Blueman</i>'
+    if ! bt_have_controller; then emit missing "n/a" false false; return; fi
+    if ! bt_powered;         then emit off "off" false false;     return; fi
 
-if ! bt_have_controller; then
-    emit "$ICON" "No Bluetooth adapter found\nRun cephalo-bt-doctor in a terminal" '["missing"]'
-    exit 0
-fi
-
-if ! bt_powered; then
-    emit "$ICON off" "Bluetooth is off\n$HINT" '["off"]'
-    exit 0
-fi
-
-tip="<b>Connected devices</b>\n"
-texts=()
-count=0
-lowest=101
-
-while IFS=$'\t' read -r mac name; do
-    [ -n "$mac" ] || continue
-    count=$((count + 1))
-    pct="$(bt_battery "$mac")"
-    flag="$STATE_DIR/low-${mac//:/_}"
-    if [[ "$pct" =~ ^[0-9]+$ ]]; then
-        texts+=("${pct}%")
-        tip+="$(esc "$name")  -  ${pct}%\n"
-        [ "$pct" -lt "$lowest" ] && lowest="$pct"
-        # one low-battery notification per discharge cycle
-        if [ "$pct" -le 15 ] && [ ! -e "$flag" ]; then
-            touch "$flag"
-            command -v notify-send >/dev/null 2>&1 &&
-                notify-send -a Bluetooth -u critical "Low battery" "$name is at ${pct}%"
-        elif [ "$pct" -ge 25 ]; then
-            rm -f "$flag"
+    while IFS=$'\t' read -r mac name; do
+        [ -n "$mac" ] || continue
+        count=$((count + 1))
+        pct="$(bt_battery "$mac")"
+        flag="$STATE_DIR/low-${mac//:/_}"
+        if [[ "$pct" =~ ^[0-9]+$ ]]; then
+            joined+="${joined:+ · }${pct}%"
+            [ "$pct" -lt "$lowest" ] && lowest="$pct"
+            # one low-battery notification per discharge cycle
+            if [ "$pct" -le 15 ] && [ ! -e "$flag" ]; then
+                touch "$flag"
+                command -v notify-send >/dev/null 2>&1 &&
+                    notify-send -a Bluetooth -u critical "Low battery" "$name is at ${pct}%"
+            elif [ "$pct" -ge 25 ]; then
+                rm -f "$flag"
+            fi
         fi
-    else
-        tip+="$(esc "$name")  -  battery not reported\n"
+    done < <(bt_list Connected)
+
+    if   [ -n "$joined" ];    then label="$joined"
+    elif [ "$count" -gt 0 ];  then label="$count"
+    else                           label="on"
     fi
-done < <(bt_list Connected)
 
-[ "$count" -gt 0 ] || tip="No devices connected\n"
-tip+="$HINT"
+    if [ "$count" -gt 0 ]; then
+        [ "$lowest" -le 20 ] && low=true
+        [ "$lowest" -le 10 ] && crit=true
+        emit connected "$label" "$low" "$crit"
+    else
+        emit on "$label" false false
+    fi
+}
 
-text="$ICON"
-if [ "${#texts[@]}" -gt 0 ]; then
-    joined=""
-    for t in "${texts[@]}"; do joined+="$t · "; done
-    text="$ICON  ${joined% · }"
-elif [ "$count" -gt 0 ]; then
-    text="$ICON  $count"
-fi
-
-if [ "$count" -gt 0 ]; then
-    classes='"connected"'
-    [ "$lowest" -le 20 ] && classes+=',"low"'
-    [ "$lowest" -le 10 ] && classes+=',"critical"'
-else
-    classes='"on"'
-fi
-
-emit "$text" "$tip" "[$classes]"
+while :; do
+    kill -0 "$YPID" 2>/dev/null || exit 0      # yambar is gone: stop
+    collect
+    sleep "$INTERVAL" & sp=$!
+    wait "$sp"
+    kill "$sp" 2>/dev/null
+done
 EOF
 
     # ---- wofi menu: scan / pair / connect / disconnect / forget -----------
     put 755 "$CHROOT/usr/local/bin/cephalo-bt-menu" <<'EOF'
 #!/usr/bin/env bash
-# Bluetooth manager driven by wofi. Bound to the Waybar module (click) and Super+B.
+# Bluetooth manager driven by wofi. Bound to the yambar Bluetooth module (left click) and Super+B.
 . /usr/local/lib/cephalo/bt-lib.sh
 
 SCAN_SECONDS=10
@@ -1148,6 +1849,577 @@ EOF
     log "Bluetooth configuration written"
 }
 
+# ---------------------------------------------------------------------------
+# Wi-Fi: yambar status module + wofi network menu (NetworkManager / nmcli)
+# ---------------------------------------------------------------------------
+configure_wifi() {
+    log "Installing Wi-Fi helpers"
+
+    # ---- yambar module: connection status ---------------------------------
+    put 755 "$CHROOT/usr/local/bin/cephalo-wifi-status" <<'EOF'
+#!/usr/bin/env bash
+# yambar "script" module, continuous mode. Prints a tag set whenever something
+# changes:  state (wifi|ethernet|connecting|disconnected|off|missing)  label
+# cephalo-wifi-menu sends SIGUSR1 to refresh immediately.
+
+INTERVAL=5
+YPID=$PPID
+
+trap 'exit 0' TERM INT HUP
+trap ':' USR1                      # just wakes the sleep below
+
+last=""
+# emit STATE LABEL   (only prints when something changed)
+emit() {
+    local out nl=$'\n' lbl="${2//[|$'\n']/ }"
+    out="state|string|$1${nl}label|string|${lbl}"
+    [ "$out" = "$last" ] && return 0
+    last="$out"
+    printf '%s\n\n' "$out"
+}
+
+wifi_ssid() {
+    local line rest ssid
+    line="$(nmcli -t -f ACTIVE,SIGNAL,SSID device wifi list --rescan no 2>/dev/null | grep -m1 '^yes:')"
+    rest="${line#yes:}"
+    ssid="${rest#*:}"
+    ssid="${ssid//\\:/:}"                    # nmcli escapes ':' in terse mode
+    printf '%s' "${ssid:-Wi-Fi}"
+}
+
+collect() {
+    local running radio dev type st have_wifi=0 wifi_st="" eth_st=""
+
+    running="$(nmcli -t -f RUNNING general 2>/dev/null)"
+    if [ "$running" != running ]; then emit missing "no NetworkManager"; return; fi
+
+    radio="$(nmcli radio wifi 2>/dev/null)"
+    while IFS=: read -r dev type st; do
+        case "$type" in
+            wifi)
+                have_wifi=1
+                case "$st" in
+                    connected*)  wifi_st=connected ;;
+                    connecting*) [ "$wifi_st" = connected ] || wifi_st=connecting ;;
+                    *)           [ -n "$wifi_st" ] || wifi_st="$st" ;;
+                esac ;;
+            ethernet)
+                case "$st" in connected*) eth_st=connected ;; esac ;;
+        esac
+    done < <(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null)
+
+    if   [ "$wifi_st" = connected ];                     then emit wifi "$(wifi_ssid)"
+    elif [ "$eth_st" = connected ];                      then emit ethernet "Wired"
+    elif [ "$have_wifi" = 0 ];                           then emit missing "No Wi-Fi"
+    elif [ "$radio" = disabled ] || [ "$wifi_st" = unavailable ]; then emit off "Wi-Fi off"
+    elif [ "$wifi_st" = connecting ];                    then emit connecting "Connecting..."
+    else                                                      emit disconnected "Not connected"
+    fi
+}
+
+while :; do
+    kill -0 "$YPID" 2>/dev/null || exit 0      # yambar is gone: stop
+    collect
+    sleep "$INTERVAL" & sp=$!
+    wait "$sp"
+    kill "$sp" 2>/dev/null
+done
+EOF
+
+    # ---- wofi menu: on/off / rescan / connect / disconnect / forget -------
+    put 755 "$CHROOT/usr/local/bin/cephalo-wifi-menu" <<'EOF'
+#!/usr/bin/env bash
+# Wi-Fi manager driven by wofi + NetworkManager (nmcli).
+# Bound to the yambar Wi-Fi module (left click) and Super+W.
+
+SCAN_WAIT=3
+WOFI=(wofi --dmenu --insensitive --cache-file /dev/null --width 560 --lines 14)
+
+L_ON="Turn Wi-Fi ON"
+L_OFF="Turn Wi-Fi OFF"
+L_SCAN="Rescan for networks"
+L_ADV="Advanced settings (connection editor)"
+L_NONE="(no networks found - choose Rescan)"
+
+pick() { "${WOFI[@]}" --prompt "$1"; }
+
+note() {
+    command -v notify-send >/dev/null 2>&1 && notify-send -a Wi-Fi -t 5000 "$1" "${2:-}"
+    return 0
+}
+
+# Wake cephalo-wifi-status (the yambar script module) so the bar refreshes now.
+poke_bar() { pkill -USR1 -f /usr/local/bin/cephalo-wifi-status 2>/dev/null; return 0; }
+
+radio_on()     { [ "$(nmcli radio wifi 2>/dev/null)" = enabled ]; }
+have_adapter() { nmcli -t -f TYPE device status 2>/dev/null | grep -qx wifi; }
+
+set_power() {
+    if [ "$1" = on ]; then
+        rfkill unblock wifi 2>/dev/null
+        nmcli radio wifi on >/dev/null 2>&1
+        sleep 2
+    else
+        nmcli radio wifi off >/dev/null 2>&1
+        sleep 0.5
+    fi
+    poke_bar
+}
+
+do_scan() {
+    note "Scanning for networks" "This takes a few seconds."
+    nmcli device wifi rescan >/dev/null 2>&1
+    sleep "$SCAN_WAIT"
+}
+
+# Fills NET_LINES (the menu text) plus the parallel arrays NET_SSID, NET_ACTIVE,
+# NET_SAVED and NET_SECURE, so a chosen line can be mapped back to its network.
+build_networks() {
+    NET_LINES=(); NET_SSID=(); NET_ACTIVE=(); NET_SAVED=(); NET_SECURE=()
+    local nl=$'\n' saved seen="$nl" line inuse rest sig sec ssid mark state entry act sv se
+
+    saved="$(nmcli -t -f TYPE,NAME connection show 2>/dev/null |
+             sed -n -e 's/^802-11-wireless://p' -e 's/^wifi://p' | sed 's/\\:/:/g')"
+    saved="$nl$saved$nl"
+
+    # Active network first, then strongest signal first.
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        inuse="${line%%:*}"; rest="${line#*:}"
+        sig="${rest%%:*}";   rest="${rest#*:}"
+        sec="${rest%%:*}";   ssid="${rest#*:}"
+        ssid="${ssid//\\:/:}"
+        [ -n "$ssid" ] || continue                        # hidden network
+        case "$seen" in *"$nl$ssid$nl"*) continue ;; esac # one entry per SSID
+        seen+="$ssid$nl"
+
+        act=0; sv=0; se=0
+        [ "$inuse" = "*" ] && act=1
+        [ -n "$sec" ] && [ "$sec" != "--" ] && se=1
+        case "$saved" in *"$nl$ssid$nl"*) sv=1 ;; esac
+
+        if   [ "$act" = 1 ]; then mark="●"; state="connected"
+        elif [ "$sv"  = 1 ]; then mark="○"; state="saved"
+        elif [ "$se"  = 1 ]; then mark="+"; state="secured"
+        else                      mark="+"; state="open"
+        fi
+        printf -v entry '%s  %s   [%s, %s%%]' "$mark" "$ssid" "$state" "$sig"
+
+        NET_LINES+=("$entry"); NET_SSID+=("$ssid")
+        NET_ACTIVE+=("$act");  NET_SAVED+=("$sv"); NET_SECURE+=("$se")
+    done < <(nmcli -t -f IN-USE,SIGNAL,SECURITY,SSID device wifi list --rescan no 2>/dev/null |
+             LC_ALL=C sort -t: -k1,1r -k2,2nr)
+}
+
+do_connect() {
+    local i="$1" ssid pw="" out rc hint=""
+    ssid="${NET_SSID[i]}"
+
+    if [ "${NET_SAVED[i]}" = 1 ]; then
+        note "Connecting to $ssid" "Please wait..."
+        out="$(nmcli -w 30 connection up id "$ssid" 2>&1)"; rc=$?
+        hint=" If the password changed, choose Forget and connect again."
+    else
+        if [ "${NET_SECURE[i]}" = 1 ]; then
+            pw="$(printf '' | wofi --dmenu --password --cache-file /dev/null \
+                    --width 560 --lines 1 --prompt "Password for $ssid")" || return 0
+            [ -n "$pw" ] || return 0
+        fi
+        note "Connecting to $ssid" "Please wait..."
+        # NOTE: nmcli only takes the password as an argument, so it is briefly
+        # visible in the process list of this machine.
+        if [ -n "$pw" ]; then
+            out="$(nmcli -w 30 device wifi connect "$ssid" password "$pw" 2>&1)"; rc=$?
+        else
+            out="$(nmcli -w 30 device wifi connect "$ssid" 2>&1)"; rc=$?
+        fi
+        # A failed attempt can leave a half-made profile; drop it so a retry starts clean.
+        [ "$rc" -eq 0 ] || nmcli connection delete id "$ssid" >/dev/null 2>&1
+    fi
+
+    if [ "$rc" -eq 0 ]; then
+        note "Connected" "$ssid"
+    else
+        note "Could not connect to $ssid" "$(head -n1 <<<"$out")$hint"
+    fi
+    poke_bar
+}
+
+do_disconnect() {
+    local dev
+    dev="$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2=="wifi" {print $1; exit}')"
+    [ -n "$dev" ] && nmcli device disconnect "$dev" >/dev/null 2>&1
+    note "Disconnected" "$1"
+    poke_bar
+}
+
+do_forget() {
+    nmcli connection delete id "$1" >/dev/null 2>&1
+    note "Forgot network" "$1"
+    poke_bar
+}
+
+network_menu() {
+    local i="$1" ssid act sv choice
+    local -a opts
+    ssid="${NET_SSID[i]}"; act="${NET_ACTIVE[i]}"; sv="${NET_SAVED[i]}"
+
+    if   [ "$act" = 1 ]; then opts=("Disconnect" "Forget this network" "Back")
+    elif [ "$sv"  = 1 ]; then opts=("Connect" "Forget this network" "Back")
+    else                      opts=("Connect" "Back")
+    fi
+
+    choice="$(printf '%s\n' "${opts[@]}" | pick "$ssid")" || return 0
+    case "$choice" in
+        "Connect")              do_connect "$i" ;;
+        "Disconnect")           do_disconnect "$ssid" ;;
+        "Forget this network")  do_forget "$ssid" ;;
+    esac
+}
+
+main_menu() {
+    local choice i
+    while :; do
+        if ! have_adapter; then
+            note "No Wi-Fi adapter found" "Is NetworkManager running and the adapter's driver/firmware loaded?"
+            exit 1
+        fi
+
+        if radio_on; then
+            build_networks
+            choice="$({
+                printf '%s\n' "$L_OFF" "$L_SCAN"
+                if [ "${#NET_LINES[@]}" -gt 0 ]; then printf '%s\n' "${NET_LINES[@]}"; else printf '%s\n' "$L_NONE"; fi
+                printf '%s\n' "$L_ADV"
+            } | pick "Wi-Fi")" || exit 0
+        else
+            choice="$(printf '%s\n' "$L_ON" "$L_ADV" | pick "Wi-Fi is off")" || exit 0
+        fi
+
+        case "$choice" in
+            "$L_ON")   set_power on ;;
+            "$L_OFF")  set_power off ;;
+            "$L_SCAN") do_scan ;;
+            "$L_NONE") ;;
+            "$L_ADV")  setsid nm-connection-editor >/dev/null 2>&1 & exit 0 ;;
+            *)
+                for ((i = 0; i < ${#NET_LINES[@]}; i++)); do
+                    if [ "${NET_LINES[i]}" = "$choice" ]; then network_menu "$i"; break; fi
+                done
+                ;;
+        esac
+    done
+}
+
+main_menu
+EOF
+
+    log "Wi-Fi configuration written"
+}
+
+# ---------------------------------------------------------------------------
+# Wallpaper: per-monitor, resolution-matched (cephalo-wallpaper + swaybg + wlr-randr)
+# ---------------------------------------------------------------------------
+configure_wallpaper() {
+    log "Installing wallpaper helper"
+
+    {
+        echo "# Cephalo wallpaper settings. Override per user in ~/.config/cephalo/wallpaper.conf"
+        echo "# Files are <WALLPAPER_NAME>_<W>x<H>.png under WALLPAPER_BASE_URL."
+        printf 'WALLPAPER_NAME="%s"\n' "$WALLPAPER_NAME"
+        printf 'WALLPAPER_BASE_URL="%s"\n' "$WALLPAPER_BASE_URL"
+        echo "# fill | fit | stretch | center | tile"
+        echo 'WALLPAPER_MODE="fill"'
+    } | put 644 "$CHROOT/etc/cephalo/wallpaper.conf"
+
+    put 755 "$CHROOT/usr/local/bin/cephalo-wallpaper" <<'EOF'
+#!/usr/bin/env bash
+# cephalo-wallpaper: give every monitor the wallpaper size that fits it best.
+#
+#   cephalo-wallpaper           run (started from the labwc autostart). Starts swaybg with
+#                               one image per monitor, downloads sizes it does not have yet
+#                               (once online; retries as soon as a connection comes up) and
+#                               keeps watching for monitors being plugged in / unplugged /
+#                               changing mode. If it is already
+#                               running, it tells that instance to re-apply and exits.
+#   cephalo-wallpaper --print   show what would be used for each monitor, then exit
+#
+# Config (later file wins): /etc/cephalo/wallpaper.conf, ~/.config/cephalo/wallpaper.conf
+#   WALLPAPER_NAME      file prefix, files are  <name>_<W>x<H>.png
+#   WALLPAPER_BASE_URL  where the files are downloaded from
+#   WALLPAPER_MODE      fill (default) | fit | stretch | center | tile
+#   POLL_SECONDS        how often to look for monitor changes (default 5)
+
+# Every size that exists. Keep in sync with the wallpaper repo.
+RES_LIST="
+1280x720 1366x768 1600x900 1920x1080 2560x1440 3840x2160 5120x2880 7680x4320
+1280x800 1440x900 1680x1050 1920x1200 2560x1600 2880x1800 3840x2400
+2256x1504 2880x1920 3000x2000
+2560x1080 3440x1440 3840x1600 5120x2160
+3840x1080 5120x1440 7680x2160
+1280x1024 1600x1200 1024x768
+"
+
+SYS_DIR="${CEPHALO_WP_SYS_DIR:-/usr/share/backgrounds/cephalo}"
+GRADIENT="${CEPHALO_WP_GRADIENT:-/usr/share/backgrounds/cephalo-gradient.png}"
+CACHE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/cephalo/wallpapers"
+RUNTIME="${XDG_RUNTIME_DIR:-/tmp}"
+
+WALLPAPER_NAME=humble_lightripple
+WALLPAPER_BASE_URL=""
+WALLPAPER_MODE=fill
+POLL_SECONDS=5
+FALLBACK_COLOR=1e1e2e
+FAIL_BACKOFF_MIN=10
+
+say() { echo "cephalo-wallpaper: $*" >&2; }
+
+load_config() {
+    local f
+    for f in /etc/cephalo/wallpaper.conf "${XDG_CONFIG_HOME:-$HOME/.config}/cephalo/wallpaper.conf"; do
+        [ -r "$f" ] && . "$f"
+    done
+    RES_LIST="${RES_LIST//$'\n'/ }"
+}
+
+# "NAME WIDTH HEIGHT" per enabled monitor: the current mode in physical pixels,
+# swapped for rotated (portrait) monitors.
+outputs() {
+    wlr-randr 2>/dev/null | awk '
+        function flush() {
+            if (name != "" && enabled && w > 0) {
+                if (tf ~ /^(90|270|flipped-90|flipped-270)$/) { t = w; w = h; h = t }
+                print name, w, h
+            }
+            name = ""
+        }
+        /^[^[:space:]]/            { flush(); name = $1; enabled = 1; w = 0; h = 0; tf = "normal"; next }
+        /^[[:space:]]+Enabled:/    { enabled = ($2 == "yes"); next }
+        /^[[:space:]]+Transform:/  { tf = $2; next }
+        /^[[:space:]]+[0-9]+x[0-9]+ px,/ && /current/ { split($1, a, "x"); w = a[1]; h = a[2]; next }
+        END { flush() }'
+}
+
+# pick_res WIDTH HEIGHT "LIST OF WxH"  ->  the entry that suits that monitor best:
+#   1. an exact match;
+#   2. otherwise the closest aspect ratio (ratios within ~3% count as the same);
+#   3. within that ratio, the smallest image that still covers the monitor
+#      (so it is only ever scaled down), or the largest one if none is big enough.
+pick_res() {
+    awk -v W="$1" -v H="$2" -v list="$3" 'BEGIN {
+        n = split(list, c, " ")
+        for (i = 1; i <= n; i++) if (c[i] == W "x" H) { print c[i]; exit }
+        L = (W > H) ? W : H; S = (W > H) ? H : W; ta = L / S      # orientation-free ratio
+        mind = 1e9
+        for (i = 1; i <= n; i++) {
+            split(c[i], p, "x"); d = log((p[1] / p[2]) / ta); if (d < 0) d = -d
+            dist[i] = d; if (d < mind) mind = d
+        }
+        for (i = 1; i <= n; i++) {
+            if (dist[i] > mind + 0.03) continue
+            split(c[i], p, "x"); area = p[1] * p[2]
+            if (p[1] >= W && p[2] >= H) { if (up == "" || area < upa) { up = c[i]; upa = area } }
+            else                        { if (dn == "" || area > dna) { dn = c[i]; dna = area } }
+        }
+        print (up != "") ? up : dn
+    }'
+}
+
+# Path of the local copy of one size (download cache first, then any copy placed system-wide in SYS_DIR).
+local_file() {
+    local f
+    for f in "$CACHE_DIR/${WALLPAPER_NAME}_$1.png" "$SYS_DIR/${WALLPAPER_NAME}_$1.png"; do
+        [ -s "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+    return 1
+}
+
+avail_list() {
+    local r
+    for r in $RES_LIST; do
+        local_file "$r" >/dev/null && printf '%s ' "$r"
+    done
+}
+
+# One tab-separated line per monitor:  NAME  WxH  wanted-size  size-used-now  file-used-now
+# ("-" when nothing is downloaded yet).
+make_plan() {
+    local avail name w h want use file
+    avail="$(avail_list)"
+    while read -r name w h; do
+        [ -n "$name" ] || continue
+        want="$(pick_res "$w" "$h" "$RES_LIST")"
+        use=""; file=""
+        if [ -n "$avail" ]; then
+            use="$(pick_res "$w" "$h" "$avail")"
+            [ -n "$use" ] && file="$(local_file "$use")"
+        fi
+        printf '%s\t%sx%s\t%s\t%s\t%s\n' "$name" "$w" "$h" "$want" "${use:--}" "${file:--}"
+    done < <(outputs)
+}
+
+# Image for monitors we have no plan for (e.g. one that was just plugged in).
+default_image() {
+    local f
+    f="$(compgen -G "$SYS_DIR/${WALLPAPER_NAME}_*.png" | head -n1)"
+    [ -n "$f" ] || f="$(compgen -G "$CACHE_DIR/${WALLPAPER_NAME}_*.png" | head -n1)"
+    [ -n "$f" ] || { [ -s "$GRADIENT" ] && f="$GRADIENT"; }
+    printf '%s' "$f"
+}
+
+# True when NetworkManager reports a working connection (if there is no nmcli we
+# cannot tell, so assume we are online and let the download itself decide).
+online() {
+    command -v nmcli >/dev/null 2>&1 || return 0
+    [ "$(nmcli -t -f STATE general 2>/dev/null)" = connected ]
+}
+
+# Download one size in the background (at most one download per size at a time, and
+# a failed size is not retried for FAIL_BACKOFF_MIN minutes).
+start_fetch() {
+    local res="$1" lock="$CACHE_DIR/.lock-$1" fail="$CACHE_DIR/.fail-$1"
+    [ -n "$WALLPAPER_BASE_URL" ] || return 0
+    command -v wget >/dev/null 2>&1 || return 0
+    if [ -e "$fail" ] && [ -z "$(find "$fail" -mmin +"$FAIL_BACKOFF_MIN" 2>/dev/null)" ]; then
+        return 0
+    fi
+    mkdir "$lock" 2>/dev/null || return 0
+    (
+        tmp="$CACHE_DIR/.dl-$res.$$"
+        url="$WALLPAPER_BASE_URL/${WALLPAPER_NAME}_${res}.png"
+        say "downloading ${WALLPAPER_NAME}_${res}.png"
+        if wget -q --timeout=20 --tries=2 -O "$tmp" "$url" \
+           && [ "$(head -c4 "$tmp" | tail -c3)" = PNG ]; then
+            mv -f "$tmp" "$CACHE_DIR/${WALLPAPER_NAME}_${res}.png"
+            rm -f "$fail"
+            say "got ${WALLPAPER_NAME}_${res}.png"
+        else
+            rm -f "$tmp"; : > "$fail"
+            say "could not download $url (will retry in $FAIL_BACKOFF_MIN min)"
+        fi
+        rmdir "$lock"
+    ) 9>&- >/dev/null &
+}
+
+# (Re)start swaybg for the given plan; the new one is up before the old one goes.
+apply() {
+    local plan="$1" name mode want use file img new
+    local -a args=()
+    while IFS=$'\t' read -r name mode want use file; do
+        [ -n "$name" ] || continue
+        if [ "$file" != "-" ]; then
+            args+=(-o "$name" -i "$file" -m "$WALLPAPER_MODE" -c "$FALLBACK_COLOR")
+            say "$name ($mode): $(basename "$file")"
+        else
+            say "$name ($mode): nothing downloaded yet, using the default background"
+        fi
+    done <<<"$plan"
+
+    img="$(default_image)"
+    if [ -n "$img" ]; then
+        args+=(-o '*' -i "$img" -m "$WALLPAPER_MODE" -c "$FALLBACK_COLOR")
+    else
+        args+=(-o '*' -c "$FALLBACK_COLOR")
+    fi
+
+    swaybg "${args[@]}" 9>&- >/dev/null &
+    new=$!
+    sleep 0.4
+    if [ -n "$SWAYBG_PID" ]; then
+        kill "$SWAYBG_PID" 2>/dev/null
+        wait "$SWAYBG_PID" 2>/dev/null
+    fi
+    SWAYBG_PID=$new
+}
+
+print_plan() {
+    local plan name mode want use file state
+    plan="$(make_plan)"
+    if [ -z "$plan" ]; then
+        echo "No monitors detected (needs wlr-randr and a running Wayland session)."
+        return 1
+    fi
+    while IFS=$'\t' read -r name mode want use file; do
+        if local_file "$want" >/dev/null; then state="on disk"
+        else state="not downloaded yet, showing ${use}"; fi
+        printf '%-14s %-10s -> %-10s (%s)\n' "$name" "$mode" "$want" "$state"
+    done <<<"$plan"
+}
+
+cleanup() {
+    [ -n "$SWAYBG_PID" ] && kill "$SWAYBG_PID" 2>/dev/null
+    rm -f "$RUNTIME/cephalo-wallpaper.pid"
+}
+
+main() {
+    local plan name mode want use file warned=0 pid
+    case "${1:-}" in
+        --print|-p) load_config; print_plan; exit $? ;;
+        -h|--help)  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    esac
+
+    command -v swaybg >/dev/null 2>&1 || { say "swaybg is not installed"; exit 1; }
+    mkdir -p "$CACHE_DIR"
+
+    # Only one instance; a second invocation just asks the first to re-apply.
+    exec 9>"$RUNTIME/cephalo-wallpaper.lock"
+    if ! flock -n 9; then
+        pid="$(cat "$RUNTIME/cephalo-wallpaper.pid" 2>/dev/null)"
+        [ -n "$pid" ] && kill -USR1 "$pid" 2>/dev/null
+        exit 0
+    fi
+    echo $$ > "$RUNTIME/cephalo-wallpaper.pid"
+    rm -rf "$CACHE_DIR"/.lock-* "$CACHE_DIR"/.dl-* 2>/dev/null   # leftovers of a killed run
+
+    SWAYBG_PID=""
+    was_online=0
+    last="__none__"
+    trap 'last=__none__' USR1            # wakes the sleep below and forces a re-apply
+    trap 'exit 0' TERM INT HUP
+    trap cleanup EXIT
+
+    while :; do
+        load_config
+        plan="$(make_plan)"
+        if [ -z "$plan" ] && [ "$warned" = 0 ]; then
+            say "no monitors detected (is wlr-randr installed?); using the default image everywhere"
+            warned=1
+        fi
+
+        # Fetch any size we want but do not have yet, but only while online. When a
+        # connection comes up, forget earlier failures so we retry straight away.
+        if online; then
+            if [ "$was_online" = 0 ]; then
+                rm -f "$CACHE_DIR"/.fail-* 2>/dev/null
+                was_online=1
+            fi
+            while IFS=$'\t' read -r name mode want use file; do
+                [ -n "$want" ] || continue
+                local_file "$want" >/dev/null || start_fetch "$want"
+            done <<<"$plan"
+        else
+            was_online=0
+        fi
+
+        # (re)apply on first run, a monitor/file change, a poke, or if swaybg died
+        if [ "$plan" != "$last" ] \
+           || { [ -n "$SWAYBG_PID" ] && ! kill -0 "$SWAYBG_PID" 2>/dev/null; }; then
+            apply "$plan"
+            last="$plan"
+        fi
+
+        sleep "$POLL_SECONDS" 9>&- & sp=$!
+        wait "$sp"
+        kill "$sp" 2>/dev/null
+    done
+}
+
+main "$@"
+EOF
+
+    log "Wallpaper configuration written"
+}
+
 # Verify the bundled custom kernel was built with what Bluetooth needs.
 BT_KERNEL_WARNING=""
 check_kernel_bluetooth() {
@@ -1191,12 +2463,16 @@ install_main() {
     if [ -d /sys/firmware/efi ]; then BOOT_MODE="uefi"; else BOOT_MODE="bios"; fi
 
     need_installer_tools
-    [ -d "$PAYLOAD_DIR/kernel" ] || die "No bundled kernel at $PAYLOAD_DIR/kernel — run this from the Cephalo live ISO."
 
     ui_msg "Welcome to the Cephalo installer.\n\nThis will erase a disk of your choice and install Cephalo on it.\nThe system is downloaded and built from the Debian mirror, so a network connection is required and the install takes a while.\n\nDetected boot mode: $BOOT_MODE"
 
     ensure_network
     select_disk
+    detect_hardware
+    resolve_kernel
+    [ -n "$KERNEL_URL" ] || [ -d "$PAYLOAD_DIR/kernel" ] \
+        || die "Could not download a kernel and none is bundled at $PAYLOAD_DIR/kernel. Check the network and retry."
+    show_hw_summary
     prompt_system_settings
     confirm_erase
 
@@ -1207,10 +2483,16 @@ install_main() {
     write_fstab
     mount_chroot
     prepare_custom_kernel
+    prepare_splash
+    write_hw_report
     write_chroot_script
     run_chroot_setup
     configure_bluetooth
+    configure_wifi
+    configure_wallpaper
+    configure_drive
     check_kernel_bluetooth
+    check_kernel_splash
     configure_target_users
     install_bootloader
     unmount_chroot
@@ -1230,8 +2512,21 @@ usage() {
     sed -n '2,/^set -euo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
+detect_only() {
+    if [ -z "$INSTALL_DISK" ]; then
+        INSTALL_DISK="$(lsblk -dnpo NAME,TYPE | awk '$2=="disk" && $1 !~ /\/(zram|ram|nbd|loop|fd)[0-9]*$/ {print $1; exit}')"
+    fi
+    [ -n "$INSTALL_DISK" ] || die "no disk found"
+    detect_hardware
+    resolve_kernel
+    echo; hw_summary
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 case "${1:-install}" in
     install)         install_main ;;
+    detect)          detect_only ;;
     -h|--help|help)  usage ;;
     *)               usage >&2; die "unknown argument: $1" ;;
 esac
+fi
