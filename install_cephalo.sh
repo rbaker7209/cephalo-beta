@@ -859,11 +859,11 @@ EOF
 fi
 
 cat > /etc/os-release <<'EOF'
-PRETTY_NAME="Cephalo OS prerelease (Tannuella)"
-NAME="cephalo 0.0.9.5"
-VERSION_ID="0.0.9.5"
-VERSION="0.0.9.5 (Tannuella)"
-VERSION_CODENAME=Tannuella
+PRETTY_NAME="Cephalo OS prerelease ${OS_CODENAME}"
+NAME="cephalo ${OS_VERSION}"
+VERSION_ID="${OS_VERSION}"
+VERSION="${OS_VERSION} (${OS_CODENAME})"
+VERSION_CODENAME="${OS_CODENAME}"
 DEBIAN_VERSION_FULL=13.7
 ID=debian
 HOME_URL="https://www.debian.org/"
