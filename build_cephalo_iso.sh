@@ -48,7 +48,7 @@ KERNEL_TARGET="${KERNEL_TARGET:-v1}"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
 SUITE="trixie"
 
-HOSTNAME="cephalo-INSTdisk"
+HOSTNAME="cephalo-live"
 LOCALE="en_US.UTF-8"
 KEYBOARD_LAYOUT="us"
 
@@ -68,14 +68,16 @@ LAUNCH_INSTALLER_ON_LOGIN="${LAUNCH_INSTALLER_ON_LOGIN:-0}"
 # --- Live image package sets (command line only) -------------------------
 # Core: init, initramfs tooling, and the whole Wi-Fi stack. wireless-regdb is
 # required for 5 GHz channels (it is only a Recommends, which we disable).
-BASE_PKGS="systemd-sysv initramfs-tools zstd kmod network-manager wpasupplicant wireless-regdb"
+# systemd-timesyncd is a separate package in Trixie; it provides the NTP client
+# used to fix the clock as soon as the live session gets online (see below).
+BASE_PKGS="systemd-sysv initramfs-tools zstd kmod network-manager wpasupplicant wireless-regdb systemd-timesyncd"
 # Small helpers for getting online / diagnosing hardware (installed tolerantly)
 TOOL_PKGS="iw rfkill kbd pciutils usbutils"
 
 MICROCODE_PKGS="intel-microcode amd64-microcode"
 # Network firmware only: Wi-Fi first, plus the Ethernet NICs that refuse to
 # work without blobs. No GPU, sound or other firmware (the console runs on
-# the firmware framebuffer via nomodeset, thank god theres no nvidia drivers).
+# the firmware framebuffer via nomodeset).
 FIRMWARE_PKGS="firmware-iwlwifi firmware-atheros firmware-realtek firmware-brcm80211 firmware-ath9k-htc firmware-libertas firmware-ralink firmware-mediatek firmware-misc-nonfree firmware-bnx2 firmware-bnx2x"
 
 # Build tools needed only to compile the Broadcom module; removed afterwards
@@ -188,7 +190,7 @@ set -euo pipefail
 
 echo 'APT::Install-Recommends "0";' > /etc/apt/apt.conf.d/99no-recommends
 
-# Don't install docs, man/info pages or translations (copyright files stay, I dont really want to get sued)
+# Don't install docs, man/info pages or translations (copyright files stay)
 cat > /etc/dpkg/dpkg.cfg.d/99-cephalo-slim <<EOF
 path-exclude=/usr/share/doc/*
 path-include=/usr/share/doc/*/copyright
@@ -304,6 +306,30 @@ apt-get install -y $INSTALLER_PKGS
 # --- Network ---------------------------------------------------------------
 systemctl enable NetworkManager.service
 systemctl disable NetworkManager-wait-online.service || true
+
+# --- Time sync: NTP as soon as we first get a connection ---------------------
+# Machines without a good RTC boot with a wrong clock, which breaks TLS
+# certificate checks (debootstrap/wget in the installer). timesyncd alone only
+# retries with backoff and isn't told when NetworkManager connects, so a
+# NetworkManager dispatcher hook kicks it the moment an interface comes up.
+systemctl enable systemd-timesyncd.service
+
+mkdir -p /etc/NetworkManager/dispatcher.d
+cat > /etc/NetworkManager/dispatcher.d/50-cephalo-ntp <<'EOF'
+#!/bin/sh
+# Args: \$1 = interface, \$2 = action
+case "\$2" in
+    up|dhcp4-change|dhcp6-change) ;;
+    *) exit 0 ;;
+esac
+[ "\$1" = "lo" ] && exit 0
+# Already synced this boot? Nothing to do.
+[ -e /run/systemd/timesync/synchronized ] && exit 0
+# Restarting timesyncd makes it query its servers immediately.
+systemctl --no-block restart systemd-timesyncd.service
+exit 0
+EOF
+chmod 0755 /etc/NetworkManager/dispatcher.d/50-cephalo-ntp
 
 # --- Console: autologin as root on tty1, with a how-to banner ---------------
 echo "root:${ROOT_PASS}" | chpasswd
