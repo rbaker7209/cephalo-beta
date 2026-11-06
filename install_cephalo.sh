@@ -88,7 +88,7 @@ DISPLAY_PKGS="xserver-xorg xserver-xorg-legacy xserver-xorg-video-all xserver-xo
 LABWC_PKGS="labwc xwayland thunar xfce4-power-manager"
 LABWC_EXTRA_PKGS="yambar wofi foot mako-notifier swaybg swaylock mate-polkit papirus-icon-theme arc-theme fonts-noto fonts-noto-color-emoji fonts-font-awesome network-manager-gnome imagemagick wlr-randr wget ca-certificates"
 
-EXTRA_PKGS="firefox-esr file-roller zram-tools micro"
+EXTRA_PKGS="firefox-esr file-roller zram-tools micro systemd-timesyncd"
 
 # --- Bluetooth + audio stack ----------------------------------------------
 # CORE packages must install (the build aborts otherwise) so we never ship a
@@ -136,7 +136,6 @@ MAKO_CONFIG_SHA="8bc16ed1cb3eb4c556cbe4f0a44c27f8d607b92c6dde43f1514f2fab27598bf
 
 GTK_SETTINGS_URL="${GTK_SETTINGS_URL:-https://raw.githubusercontent.com/rbaker7209/cephalo-beta/refs/heads/prerelease/scripts%26configs/graphical_stack/GTK/settings.ini}"
 GTK_SETTINGS_SHA="1387109fb93526525ad6fb74314d685f6bd13f993176db39ee7d13b6b4ea7a56"
-
 
 # --- Wallpaper ---------------------------------------------------------------
 WALLPAPER_NAME="${WALLPAPER_NAME:-humble_lightripple}"
@@ -1125,6 +1124,8 @@ TZNAME="$TIMEZONE"
 echo "\$TZNAME" > /etc/timezone
 ln -sf "/usr/share/zoneinfo/\$TZNAME" /etc/localtime
 dpkg-reconfigure -f noninteractive tzdata || true
+
+systemctl enable systemd-timesyncd.service 
 
 apt-get install -y $BOOT_PKGS
 
